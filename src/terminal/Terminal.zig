@@ -2626,7 +2626,15 @@ pub fn cursorUp(self: *Terminal, count_req: usize) void {
         self.screens.active.cursor.y - self.scrolling_region.top
     else
         self.screens.active.cursor.y;
-    const count = @min(max, @max(count_req, 1));
+    var count = @min(max, @max(count_req, 1));
+
+    // A shell redrawing its prompt after a resize moves up by its own
+    // count of rows, which can be more than the prompt takes after we
+    // reflowed it. Don't let it go above the prompt and erase the lines
+    // before it (see Screen.promptRedrawUpLimit).
+    if (self.screens.active.promptRedrawUpLimit()) |limit| {
+        count = @min(count, limit);
+    }
 
     // We can safely intCast below because of the min/max clamping we did above.
     self.screens.active.cursorUp(@intCast(count));
@@ -2869,6 +2877,10 @@ pub fn semanticPrompt(
             // A new prompt means the program that set mode 2027 is gone.
             self.flags.myanmar_app_grapheme = false;
 
+            // A shell redrawing its prompt after a resize may start lower
+            // than where the prompt was cleared (see snapPromptRedraw).
+            self.screens.active.snapPromptRedraw();
+
             // "First do a fresh-line."
             try self.semanticPromptFreshLine();
 
@@ -2879,6 +2891,7 @@ pub fn semanticPrompt(
             screen.cursorSetSemanticContent(.{
                 .prompt = cmd.readOption(.prompt_kind) orelse .initial,
             });
+            screen.markPromptTop();
 
             // This is a kitty-specific flag that notes that the shell
             // is NOT capable of redraw. Redraw defaults to true so this
@@ -2956,6 +2969,8 @@ pub fn semanticPrompt(
         .end_input_start_output => {
             // "End of input, and start of output."
             self.screens.active.cursorSetSemanticContent(.output);
+            self.screens.active.forgetPromptRedraw();
+            self.screens.active.forgetPromptTop();
 
             // If our current row is marked as a prompt and we're
             // at column zero then we assume we're un-prompting. This
@@ -19746,4 +19761,142 @@ test "Terminal: a new prompt drops the mode 2027 Myanmar widths" {
     try testing.expect(t.flags.myanmar_app_grapheme);
     s.nextSlice("\x1b]133;A\x07");
     try testing.expect(!t.flags.myanmar_app_grapheme);
+}
+
+test "Terminal: a prompt redrawn too low after a resize moves up to the cleared prompt" {
+    // zsh on macOS counts Myanmar marks as zero columns, so it can think a
+    // prompt takes fewer rows than it does and redraw from too low after a
+    // resize. The redraw should still replace the prompt that the resize
+    // cleared, with no blank rows above it.
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 20, .rows = 6 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("out\r\n\x1b]133;A\x07> \x1b]133;B\x07");
+    s.nextSlice("abcdefghijklmnopqrstuvwxyz0123");
+
+    // 32 columns: 2 rows at 20 columns, 3 rows at 12.
+    try t.resize(alloc, .{ .cols = 12, .rows = 6 });
+    try testing.expectEqual(@as(usize, 3), t.screens.active.cursor.y);
+
+    // The shell thinks the prompt is 2 rows and moves up only 1.
+    s.nextSlice("\x1b[A\r\x1b[J\x1b]133;A\x07> \x1b]133;B\x07");
+    s.nextSlice("abcdefghijklmnopqrstuvwxyz0123");
+
+    const str = try t.plainString(alloc);
+    defer alloc.free(str);
+    try testing.expectEqualStrings("out\n> abcdefghij\nklmnopqrstuv\nwxyz0123", str);
+}
+
+test "Terminal: rows cleared for a prompt redraw are not soft-wrapped" {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 10, .rows = 4 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b]133;A\x07> \x1b]133;B\x07abcdefghijkl");
+    try t.resize(alloc, .{ .cols = 8, .rows = 4 });
+
+    const pages = &t.screens.active.pages;
+    var y: size.CellCountInt = 0;
+    while (y < t.rows) : (y += 1) {
+        const row = pages.pin(.{ .active = .{ .y = y } }).?.rowAndCell().row;
+        try testing.expect(!row.wrap);
+        try testing.expect(!row.wrap_continuation);
+    }
+}
+
+test "Terminal: narrowing clears every row of a soft-wrapped prompt for redraw" {
+    // After a resize and the shell's redraw, narrowing can split the
+    // prompt's first line so the prompt search stops at one of the new
+    // rows. The whole soft-wrapped line must still be cleared, or the
+    // shell's next redraw leaves a copy of its first row above it.
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 30, .rows = 8 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    const prompt = "\x1b]133;A\x07> \x1b]133;B\x07";
+    const text = "abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+    s.nextSlice("out\r\n" ++ prompt ++ text);
+
+    // Wider, and the shell redraws from where it thinks the prompt is.
+    try t.resize(alloc, .{ .cols = 36, .rows = 8 });
+    s.nextSlice("\x1b[A\r\x1b[J" ++ prompt ++ text);
+
+    try t.resize(alloc, .{ .cols = 12, .rows = 8 });
+
+    const str = try t.plainString(alloc);
+    defer alloc.free(str);
+    try testing.expectEqualStrings("out", str);
+}
+
+test "Terminal: clearing a prompt for redraw keeps the line it was linked to" {
+    // When the shell's widths differ from ours, it can start a prompt on a
+    // row that is still a soft-wrapped continuation of the previous line.
+    // Clearing the prompt on resize must leave that line alone.
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("0123456789abc\r\x1b]133;A\x07> \x1b]133;B\x07xyz");
+
+    try t.resize(alloc, .{ .cols = 8, .rows = 5 });
+
+    const str = try t.plainString(alloc);
+    defer alloc.free(str);
+    try testing.expectEqualStrings("01234567\n89", str);
+}
+
+test "Terminal: a prompt redraw after widening doesn't erase the line above" {
+    // The shell moves up by the rows its prompt took at the old width.
+    // After we reflow to a wider width the prompt takes fewer rows, and the
+    // shell must not move above it and erase the line before it.
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 10, .rows = 6 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    const prompt = "\x1b]133;A\x07> \x1b]133;B\x07";
+    s.nextSlice("out\r\n" ++ prompt ++ "abcdefghijklmnopqr");
+
+    // 20 columns: 2 rows at 10 columns, 1 row at 30.
+    try t.resize(alloc, .{ .cols = 30, .rows = 6 });
+
+    // The shell moves up 1 row, as it would at 10 columns.
+    s.nextSlice("\x1b[A\r\x1b[J" ++ prompt ++ "abcdefghijklmnopqr");
+
+    const str = try t.plainString(alloc);
+    defer alloc.free(str);
+    try testing.expectEqualStrings("out\n> abcdefghijklmnopqr", str);
+}
+
+test "Terminal: a prompt redraw keeps a line interrupted before it" {
+    // A line interrupted with Ctrl-C is a prompt line right before the
+    // current prompt, with no output between them. Only the current prompt
+    // is cleared for the shell to redraw.
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 10, .rows = 8 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    const prompt = "\x1b]133;A\x07> \x1b]133;B\x07";
+    // zsh after Ctrl-C: a new line, its end-of-line mark ("%" and spaces
+    // up to the last column), then the end of the command.
+    s.nextSlice(prompt ++ "old-abcdefghijk\r\r\n%         \r \r\x1b]133;D\x07");
+    s.nextSlice(prompt ++ "new-abcdefghijk");
+
+    try t.resize(alloc, .{ .cols = 30, .rows = 8 });
+
+    const str = try t.plainString(alloc);
+    defer alloc.free(str);
+    try testing.expectEqualStrings("> old-abcdefghijk", str);
 }

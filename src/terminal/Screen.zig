@@ -83,6 +83,17 @@ else
 /// Semantic prompt (OSC133) state.
 semantic_prompt: SemanticPrompt = .disabled,
 
+/// The top of the prompt that a resize cleared for the shell to redraw.
+/// The shell moves up by its own count of rows before it redraws, which
+/// can be fewer than the rows the prompt took here (zsh on macOS counts
+/// Myanmar marks as zero columns). See `snapPromptRedraw`.
+prompt_redraw_start: ?*Pin = null,
+
+/// The first row of the current prompt, where the shell started it with
+/// OSC 133;A. Resizes clear the prompt from here for the shell to redraw.
+/// See `markPromptTop`.
+prompt_top: ?*Pin = null,
+
 /// Dirty flags for the renderer.
 dirty: Dirty = .{},
 
@@ -439,6 +450,9 @@ pub fn memoryUsage(self: *const Screen) MemoryUsage {
 /// - Disables protection mode
 ///
 pub fn reset(self: *Screen) void {
+    self.forgetPromptRedraw();
+    self.forgetPromptTop();
+
     // Reset our pages
     self.pages.reset();
 
@@ -2252,6 +2266,11 @@ pub inline fn resize(
     };
     defer if (saved_cursor_pin) |p| self.pages.untrackPin(p);
 
+    // A prompt the shell will redraw must not reflow together with the
+    // line above it (see unlinkPromptTop).
+    if (opts.prompt_redraw != .false and
+        self.cursor.semantic_content != .output) self.unlinkPromptTop();
+
     // A cursor style and hyperlink are partly stored in the page containing
     // the cursor. Their IDs only have meaning within that page, and the page
     // keeps reference counts for them. Resizing can replace or destroy the
@@ -2485,19 +2504,150 @@ fn clearPromptForRedraw(
                     };
                 };
 
+                const top = self.promptTopFor(start);
+                self.rememberPromptRedraw(top);
+
                 // Clear cells from our start down. We replace it with spaces,
                 // and do not physically erase the rows (eraseRows) because the
                 // shell is going to expect this space to be available.
-                var it = start.rowIterator(.right_down, null);
+                //
+                // The rows are no longer soft-wrapped either. If the shell
+                // redraws below some of them, a later resize must not join
+                // those blank rows with the prompt, which pushes it right.
+                // Nor is the prompt a continuation of the line above: when
+                // the shell's widths differ from ours, it can start a prompt
+                // on a row still linked to the previous line, and a later
+                // resize would join the two.
+                if (top.up(1)) |above| above.rowAndCell().row.wrap = false;
+
+                var it = top.rowIterator(.right_down, null);
                 while (it.next()) |pin| {
                     const page = pin.node.page();
                     const row = pin.rowAndCell().row;
                     const cells = page.getCells(row);
                     self.clearCells(page, row, cells);
+                    row.wrap = false;
+                    row.wrap_continuation = false;
                 }
             },
         }
     }
+}
+
+/// Remember the cursor's row as the first row of a new prompt. Call when
+/// the shell starts a prompt (OSC 133;A).
+pub fn markPromptTop(self: *Screen) void {
+    var pin = self.cursor.page_pin.*;
+    pin.x = 0;
+    if (self.prompt_top) |p| {
+        p.* = pin;
+        return;
+    }
+    self.prompt_top = self.pages.trackPin(pin) catch null;
+}
+
+/// Make the first row of the current prompt the start of its own line.
+/// When the shell's widths differ from ours, it can start a prompt on a
+/// row that is still a soft-wrapped continuation of the previous line.
+/// A resize would then reflow the two together, and clearing the prompt
+/// for the shell to redraw would clear the end of that line too.
+fn unlinkPromptTop(self: *Screen) void {
+    const p = self.prompt_top orelse return;
+    if (p.garbage) return;
+    const row = p.rowAndCell().row;
+    if (!row.wrap_continuation) return;
+    row.wrap_continuation = false;
+    if (p.up(1)) |above| above.rowAndCell().row.wrap = false;
+}
+
+/// Stop tracking the first row of the prompt.
+pub fn forgetPromptTop(self: *Screen) void {
+    const pin = self.prompt_top orelse return;
+    self.pages.untrackPin(pin);
+    self.prompt_top = null;
+}
+
+/// The row to clear a prompt from, given the prompt row `start` that the
+/// prompt search found from the cursor. Prefer the row where the shell
+/// started the current prompt, when it is not below the cursor:
+///
+/// - A resize can split the prompt's first line, and the search can stop
+///   at one of the new rows, leaving the rest of the first line behind.
+/// - The search treats prompt lines with no output between them as one
+///   prompt, so it would also clear a line interrupted with Ctrl-C.
+fn promptTopFor(self: *Screen, start: Pin) Pin {
+    const p = self.prompt_top orelse return start;
+    if (p.garbage) return start;
+    const top_pt = self.pages.pointFromPin(.screen, p.*) orelse return start;
+    const cursor_pt = self.pages.pointFromPin(.screen, self.cursor.page_pin.*) orelse return start;
+    if (top_pt.screen.y > cursor_pt.screen.y) return start;
+    var top = p.*;
+    top.x = 0;
+    return top;
+}
+
+/// Remember `start` as the top of a prompt cleared for redraw. If an
+/// earlier resize already cleared from higher up (and the shell has not
+/// redrawn yet), keep that one.
+fn rememberPromptRedraw(self: *Screen, start: Pin) void {
+    if (self.prompt_redraw_start) |old| {
+        if (!old.garbage) keep: {
+            const old_pt = self.pages.pointFromPin(.screen, old.*) orelse break :keep;
+            const new_pt = self.pages.pointFromPin(.screen, start) orelse break :keep;
+            if (old_pt.screen.y <= new_pt.screen.y) return;
+        }
+        old.* = start;
+        return;
+    }
+    self.prompt_redraw_start = self.pages.trackPin(start) catch null;
+}
+
+/// Stop tracking the prompt cleared for redraw.
+pub fn forgetPromptRedraw(self: *Screen) void {
+    const pin = self.prompt_redraw_start orelse return;
+    self.pages.untrackPin(pin);
+    self.prompt_redraw_start = null;
+}
+
+/// How far the cursor may move up while the shell redraws a prompt that a
+/// resize cleared: up to the top of the cleared prompt and no further.
+/// Null when no redraw is pending.
+///
+/// The shell moves up by the rows the prompt took at the old width. After
+/// we reflow to a wider width the prompt takes fewer rows, so the shell
+/// would move above it and then erase everything below, including the
+/// lines before the prompt.
+pub fn promptRedrawUpLimit(self: *const Screen) ?usize {
+    const start = self.prompt_redraw_start orelse return null;
+    if (start.garbage) return null;
+    const pt = self.pages.pointFromPin(.active, start.*) orelse return null;
+    if (pt.active.y > self.cursor.y) return null;
+    return self.cursor.y - pt.active.y;
+}
+
+/// Call when the shell starts a new prompt (OSC 133;A). If a resize
+/// cleared a prompt above the cursor and only blank rows are between,
+/// the shell is redrawing lower than it should, because it counted fewer
+/// rows than the prompt took. Move up so the redraw replaces the cleared
+/// prompt instead of leaving blank rows above it.
+pub fn snapPromptRedraw(self: *Screen) void {
+    const tracked = self.prompt_redraw_start orelse return;
+    const start = tracked.*;
+    self.forgetPromptRedraw();
+
+    if (start.garbage or self.cursor.x != 0) return;
+    const pt = self.pages.pointFromPin(.active, start) orelse return;
+    if (pt.active.y >= self.cursor.y) return;
+
+    const n: size.CellCountInt = @intCast(self.cursor.y - pt.active.y);
+    var i: size.CellCountInt = 0;
+    while (i < n) : (i += 1) {
+        const pin = start.down(i) orelse return;
+        if (pagepkg.Cell.hasTextAny(pin.cells(.all))) return;
+    }
+
+    self.cursor.pending_wrap = false;
+    self.cursorUp(n);
 }
 
 /// Set a style attribute for the current cursor.
