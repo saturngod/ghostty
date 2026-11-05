@@ -32,6 +32,3 @@ glad.zip
 vgcore.*
 
 /sprite_face_test*
-
-# Local packaging scripts and docs
-dist/

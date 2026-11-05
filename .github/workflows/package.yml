@@ -1,0 +1,53 @@
+# Builds the Linux packages (.deb and AppImage) for x86_64 and arm64 on every
+# push to main, on native runners. Packages are uploaded as workflow artifacts.
+#
+# The macOS dmg is built and signed locally with `dist/package/build.sh dmg`.
+name: Package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }} (deb + AppImage)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # --jobs 2: compiling glslang for x86_64 alone needs ~8 GB of RAM, and
+      # these runners have 16 GB.
+      - name: Build deb and AppImage
+        run: dist/package/build.sh linux --arch ${{ matrix.arch }} --jobs 2
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostty-linux-${{ matrix.arch }}
+          path: |
+            zig-out/packages/*.deb
+            zig-out/packages/*.AppImage
+          if-no-files-found: error
