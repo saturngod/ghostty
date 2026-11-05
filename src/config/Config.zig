@@ -514,31 +514,38 @@ language: ?[:0]const u8 = null,
 /// terminals. Only new terminals will use the new configuration.
 @"grapheme-width-method": GraphemeWidthMethod = .unicode,
 
-/// How many columns Myanmar (Burmese) marks such as ြ, ေ, ာ and း take
+/// How Ghostty handles Myanmar (Burmese) marks such as ြ, ေ, ာ and း
 /// while you edit a command at the shell prompt.
 ///
 /// Shells place the cursor using the C library's idea of character
-/// widths, and those differ between systems. If Ghostty disagrees with
-/// the shell, Myanmar text you type can be redrawn in the wrong place
-/// when you edit the line.
+/// widths, and those differ between systems. zsh on macOS counts every
+/// Myanmar mark as 0 columns, while Ghostty and glibc on Linux give
+/// spacing marks a column of their own. If Ghostty disagrees with the
+/// shell, Myanmar text you type is redrawn in the wrong place (for
+/// example, မြန်မာ shows up as မမမြန်မာ).
 ///
 /// Valid values:
 ///
-/// * `standard` - Use the same widths as everywhere else (spacing marks
-///   are 1 column). This is close to how wide Myanmar text is drawn, so
-///   long lines wrap at the edge of the window. This matches glibc on
-///   Linux. This is the default.
+/// * `wrap` - Myanmar text keeps its standard widths, so long lines wrap
+///   at the edge of the window. When the shell moves the cursor left or
+///   right, Ghostty counts each syllable as one column, like the shell
+///   does. This is the default on macOS.
 ///
-/// * `zero` - Every Myanmar mark is 0 columns wide. This matches the C
-///   library on macOS, so zsh keeps the cursor in the right place while
-///   you edit. But the text is drawn much wider than the columns it is
-///   given, so long lines run past the edge of the window instead of
-///   wrapping.
+/// * `zero` - Every Myanmar mark is 0 columns wide, exactly like the
+///   shell on macOS. Myanmar text is drawn much wider than those columns,
+///   so long lines run past the edge of the window instead of wrapping.
+///
+/// * `standard` - Use the same widths as everywhere else, with no
+///   changes. This matches glibc on Linux. This is the default on other
+///   systems. Use it if you mostly work over SSH on Linux machines.
 ///
 /// This only applies while the cursor is at a prompt, which requires shell
 /// integration. Programs you run, such as editors or Claude Code, always
 /// get the standard widths.
-@"myanmar-prompt-width": MyanmarPromptWidth = .standard,
+@"myanmar-prompt-width": MyanmarPromptWidth = switch (builtin.os.tag) {
+    .macos => .wrap,
+    else => .standard,
+},
 
 /// FreeType load flags to enable. The format of this is a list of flags to
 /// enable separated by commas. If you prefix a flag with `no-` then it is
@@ -9913,6 +9920,7 @@ pub const QuickTerminalKeyboardInteractivity = enum {
 
 /// See myanmar-prompt-width
 pub const MyanmarPromptWidth = enum {
+    wrap,
     zero,
     standard,
 };

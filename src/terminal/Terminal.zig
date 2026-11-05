@@ -118,6 +118,12 @@ flags: packed struct {
     /// See the `myanmar-prompt-width` config.
     myanmar_prompt_zero_width: bool = false,
 
+    /// While the cursor is at a shell prompt, cursor moves left and right
+    /// count each Myanmar syllable (a letter and the marks after it) as one
+    /// column, like shells using the macOS C library widths. Text keeps its
+    /// standard widths. See the `myanmar-prompt-width` config (`wrap`).
+    myanmar_prompt_syllable_moves: bool = false,
+
     /// Set when the running program turned on grapheme clustering (mode
     /// 2027) itself, rather than it being on from the config. Such programs
     /// (agy) count some Myanmar spacing marks as zero width. Cleared at the
@@ -2661,6 +2667,19 @@ pub fn cursorDown(self: *Terminal, count_req: usize) void {
 /// This sequence will not scroll the screen or scroll region. If amount is
 /// 0, adjust it to 1.
 pub fn cursorRight(self: *Terminal, count_req: usize) void {
+    if (self.myanmarSyllableMoves()) {
+        // Each column the shell counts is a letter and the marks after it.
+        for (0..@max(count_req, 1)) |_| {
+            self.cursorRightCells(1);
+            while (self.cursorOnMyanmarMark() and
+                self.screens.active.cursor.x < self.cols - 1) self.cursorRightCells(1);
+        }
+        return;
+    }
+    self.cursorRightCells(count_req);
+}
+
+fn cursorRightCells(self: *Terminal, count_req: usize) void {
     // Always resets pending wrap
     self.screens.active.cursor.pending_wrap = false;
 
@@ -2675,6 +2694,33 @@ pub fn cursorRight(self: *Terminal, count_req: usize) void {
 
 /// Move the cursor to the left amount cells. If amount is 0, adjust it to 1.
 pub fn cursorLeft(self: *Terminal, count_req: usize) void {
+    if (self.myanmarSyllableMoves()) {
+        // Each column the shell counts is a letter and the marks after it,
+        // so moving left over one lands on the letter.
+        for (0..@max(count_req, 1)) |_| {
+            self.cursorLeftCells(1);
+            while (self.cursorOnMyanmarMark() and
+                self.screens.active.cursor.x > 0) self.cursorLeftCells(1);
+        }
+        return;
+    }
+    self.cursorLeftCells(count_req);
+}
+
+/// Whether cursor moves count Myanmar syllables rather than cells (see
+/// `Flags.myanmar_prompt_syllable_moves`).
+fn myanmarSyllableMoves(self: *Terminal) bool {
+    return self.flags.myanmar_prompt_syllable_moves and self.cursorIsAtPrompt();
+}
+
+/// Whether the cursor is on a Myanmar mark, which belongs to the letter
+/// before it.
+fn cursorOnMyanmarMark(self: *Terminal) bool {
+    const cell = self.screens.active.cursor.page_cell;
+    return cell.hasText() and unicode.myanmar.isMark(cell.codepoint());
+}
+
+fn cursorLeftCells(self: *Terminal, count_req: usize) void {
     // Wrapping behavior depends on various terminal modes
     const WrapMode = enum { none, reverse, reverse_extended };
     const wrap_mode: WrapMode = wrap_mode: {
@@ -19899,4 +19945,59 @@ test "Terminal: a prompt redraw keeps a line interrupted before it" {
     const str = try t.plainString(alloc);
     defer alloc.free(str);
     try testing.expectEqualStrings("> old-abcdefghijk", str);
+}
+
+fn testMyanmarTyping(syllable_moves: bool, out: []const u8) ![]const u8 {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 30, .rows = 3 });
+    defer t.deinit(alloc);
+    t.modes.set(.grapheme_cluster, true);
+    t.flags.myanmar_prompt_syllable_moves = syllable_moves;
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b]133;A\x07> \x1b]133;B\x07");
+    s.nextSlice(out);
+    return try t.plainString(alloc);
+}
+
+test "Terminal: typing Myanmar at a zsh prompt on macOS" {
+    // What zsh on macOS sends while you type မြန်မာ key by key. It counts
+    // every mark as zero columns, so it backs up one syllable at a time
+    // and reprints it.
+    const typed = "မ\x08မြ\x08မြန\x08\x08မြန်မ\x08မာ";
+
+    const fixed = try testMyanmarTyping(true, typed);
+    defer testing.allocator.free(fixed);
+    try testing.expectEqualStrings("> မြန်မာ", fixed);
+
+    // Counting cells instead leaves letters behind.
+    const broken = try testMyanmarTyping(false, typed);
+    defer testing.allocator.free(broken);
+    try testing.expect(!std.mem.eql(u8, broken, "> မြန်မာ"));
+}
+
+test "Terminal: arrow keys move over Myanmar syllables at the prompt" {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 30, .rows = 3 });
+    defer t.deinit(alloc);
+    t.modes.set(.grapheme_cluster, true);
+    t.flags.myanmar_prompt_syllable_moves = true;
+
+    var s = t.vtStream();
+    defer s.deinit();
+    // ကြော (က ြ ေ ာ: 4 cells) then က.
+    s.nextSlice("\x1b]133;A\x07\x1b]133;B\x07ကြောက");
+    try testing.expectEqual(@as(usize, 5), t.screens.active.cursor.x);
+
+    s.nextSlice("\x1b[D");
+    try testing.expectEqual(@as(usize, 4), t.screens.active.cursor.x);
+    s.nextSlice("\x1b[D");
+    try testing.expectEqual(@as(usize, 0), t.screens.active.cursor.x);
+    s.nextSlice("\x1b[C");
+    try testing.expectEqual(@as(usize, 4), t.screens.active.cursor.x);
+
+    // Command output moves by cells.
+    s.nextSlice("\x1b]133;C\x07\r\nကြော\x1b[D");
+    try testing.expectEqual(@as(usize, 3), t.screens.active.cursor.x);
 }

@@ -304,6 +304,8 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     // Myanmar marks at the prompt follow the shell's widths.
     term.flags.myanmar_prompt_zero_width =
         opts.full_config.@"myanmar-prompt-width" == .zero;
+    term.flags.myanmar_prompt_syllable_moves =
+        opts.full_config.@"myanmar-prompt-width" == .wrap;
 
     // Setup our terminal size in pixels for certain requests.
     term.width_px = term.cols * opts.size.cell.width;
