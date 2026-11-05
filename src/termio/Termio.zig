@@ -301,6 +301,10 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     // once the terminal owns its memory and can release it on deinit.
     try term.colors.palette.changeDefault(alloc, opts.config.palette);
 
+    // Myanmar marks at the prompt follow the shell's widths.
+    term.flags.myanmar_prompt_zero_width =
+        opts.full_config.@"myanmar-prompt-width" == .zero;
+
     // Setup our terminal size in pixels for certain requests.
     term.width_px = term.cols * opts.size.cell.width;
     term.height_px = term.rows * opts.size.cell.height;

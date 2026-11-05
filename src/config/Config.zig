@@ -514,6 +514,32 @@ language: ?[:0]const u8 = null,
 /// terminals. Only new terminals will use the new configuration.
 @"grapheme-width-method": GraphemeWidthMethod = .unicode,
 
+/// How many columns Myanmar (Burmese) marks such as ြ, ေ, ာ and း take
+/// while you edit a command at the shell prompt.
+///
+/// Shells place the cursor using the C library's idea of character
+/// widths, and those differ between systems. If Ghostty disagrees with
+/// the shell, Myanmar text you type gets redrawn in the wrong place and
+/// the cursor can't reach the start of the line.
+///
+/// Valid values:
+///
+/// * `zero` - Every Myanmar mark is 0 columns wide. This matches the C
+///   library on macOS. This is the default on macOS.
+///
+/// * `standard` - Use the same widths as everywhere else (spacing marks
+///   are 1 column). This matches glibc on Linux. This is the default on
+///   other systems.
+///
+/// This only applies while the cursor is at a prompt, which requires shell
+/// integration. Programs you run, such as editors or Claude Code, always
+/// get the standard widths. Use `standard` if you mostly work over SSH on
+/// Linux machines from macOS.
+@"myanmar-prompt-width": MyanmarPromptWidth = switch (builtin.os.tag) {
+    .macos => .zero,
+    else => .standard,
+},
+
 /// FreeType load flags to enable. The format of this is a list of flags to
 /// enable separated by commas. If you prefix a flag with `no-` then it is
 /// disabled. If you omit a flag, its default value is used, so you must
@@ -9879,6 +9905,12 @@ pub const QuickTerminalKeyboardInteractivity = enum {
     none,
     @"on-demand",
     exclusive,
+};
+
+/// See myanmar-prompt-width
+pub const MyanmarPromptWidth = enum {
+    zero,
+    standard,
 };
 
 /// See grapheme-width-method

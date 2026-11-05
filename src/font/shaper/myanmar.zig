@@ -28,6 +28,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const font = @import("../main.zig");
+const unicode = @import("../../unicode/main.zig");
 
 /// A shaped glyph in visual order, in natural (unsnapped) coordinates
 /// relative to the start of the run, in pixels.
@@ -45,37 +46,8 @@ pub const Glyph = struct {
     advance: f64,
 };
 
-/// Returns true if the codepoint is in one of the Myanmar blocks.
-pub fn isMyanmar(cp: u32) bool {
-    return switch (cp) {
-        0x1000...0x109F, // Myanmar
-        0xA9E0...0xA9FF, // Myanmar Extended-B
-        0xAA60...0xAA7F, // Myanmar Extended-A
-        0x116D0...0x116FF, // Myanmar Extended-C
-        => true,
-        else => false,
-    };
-}
-
-/// Returns true if the codepoint is a Myanmar combining mark (vowel sign,
-/// medial, tone mark, asat, virama, ...). Marks never start a syllable.
-pub fn isMark(cp: u32) bool {
-    return switch (cp) {
-        0x102B...0x103E,
-        0x1056...0x1059,
-        0x105E...0x1060,
-        0x1062...0x1064,
-        0x1067...0x106D,
-        0x1071...0x1074,
-        0x1082...0x108D,
-        0x108F,
-        0x109A...0x109D,
-        0xA9E5,
-        0xAA7B...0xAA7D,
-        => true,
-        else => false,
-    };
-}
+pub const isMyanmar = unicode.myanmar.isMyanmar;
+pub const isMark = unicode.myanmar.isMark;
 
 /// Joiners and variation selectors stay attached to the text they follow.
 fn isJoiner(cp: u32) bool {

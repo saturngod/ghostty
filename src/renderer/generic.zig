@@ -213,7 +213,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// for every row.
         myanmar_rows: ?*myanmar_flow.Rows = null,
         myanmar_segments: std.ArrayList(myanmar_flow.Segment) = .empty,
-        myanmar_selection: std.ArrayList(?terminal.color.RGB) = .empty,
+        myanmar_backgrounds: std.ArrayList(?terminal.color.RGB) = .empty,
         myanmar_rects: std.ArrayList(shaderpkg.CellText) = .empty,
 
         /// The images that we may render.
@@ -878,7 +878,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.font_shaper.deinit();
             self.font_shaper_cache.deinit(self.alloc);
             self.myanmar_segments.deinit(self.alloc);
-            self.myanmar_selection.deinit(self.alloc);
+            self.myanmar_backgrounds.deinit(self.alloc);
             self.myanmar_rects.deinit(self.alloc);
 
             self.config.deinit();
@@ -3013,8 +3013,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
             const myanmar_row = myanmar_segments.len > 0;
             if (myanmar_row) {
-                self.myanmar_selection.clearRetainingCapacity();
-                try self.myanmar_selection.appendNTimes(self.alloc, null, cells_len);
+                self.myanmar_backgrounds.clearRetainingCapacity();
+                try self.myanmar_backgrounds.appendNTimes(self.alloc, null, cells_len);
             }
 
             var run_iter = self.font_shaper.runIterator(run_iter_opts);
@@ -3149,12 +3149,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .bold = self.config.bold_color,
                 });
 
-                // The background color for the cell when it isn't selected.
-                const bg_plain = if (style.flags.inverse != isCovering(cell.codepoint()))
-                    fg_style
-                else
-                    bg_style;
-
                 // The final background color for the cell.
                 const bg = switch (selected) {
                     // If we have an explicit selection background color
@@ -3234,18 +3228,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Foreground alpha for this cell.
                 const alpha: u8 = if (style.flags.faint) self.config.faint_opacity else 255;
 
-                // In rows with Myanmar text, the text isn't exactly on its
-                // cells, so selection and search highlights are drawn at the
-                // text's real position after the row (see below) instead of
-                // as the cell background.
-                const highlight_on_grid = selected != .false and !myanmar_row;
-                if (myanmar_row and selected != .false) {
-                    self.myanmar_selection.items[x] = bg orelse state.colors.foreground;
-                }
-
                 // Set the cell's background color.
                 {
-                    const rgb = (if (myanmar_row) bg_plain else bg) orelse state.colors.background;
+                    const rgb = bg orelse state.colors.background;
 
                     // Determine our background alpha. If we have transparency configured
                     // then this is dynamic depending on some situations. This is all
@@ -3255,7 +3240,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         const default: u8 = 255;
 
                         // Cells that are selected should be fully opaque.
-                        if (highlight_on_grid) break :bg_alpha default;
+                        if (selected != .false) break :bg_alpha default;
 
                         // Cells that are reversed should be fully opaque.
                         if (style.flags.inverse) break :bg_alpha default;
@@ -3276,9 +3261,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         break :bg_alpha 0;
                     };
 
-                    self.cells.bgCell(y, x).* = .{
-                        rgb.r, rgb.g, rgb.b, bg_alpha,
-                    };
+                    // In rows with Myanmar text, the text isn't exactly on its
+                    // cells, so any visible background (selection, search,
+                    // inverse video, colors) is drawn under the text's real
+                    // position after the row instead (see below).
+                    if (myanmar_row and bg_alpha > 0) {
+                        self.myanmar_backgrounds.items[x] = rgb;
+                        self.cells.bgCell(y, x).* = .{ 0, 0, 0, 0 };
+                    } else {
+                        self.cells.bgCell(y, x).* = .{
+                            rgb.r, rgb.g, rgb.b, bg_alpha,
+                        };
+                    }
                 }
 
                 // If the invisible flag is set on this cell then we
@@ -3467,8 +3461,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             return self.myanmar_segments.items;
         }
 
-        /// Draw the selection and search highlights of a Myanmar row at the
-        /// position of its text, underneath the text.
+        /// Draw the cell backgrounds of a Myanmar row (selection, search,
+        /// inverse video, colors) at the position of its text, underneath
+        /// the text.
         fn addMyanmarHighlights(
             self: *Self,
             y: terminal.size.CellCountInt,
@@ -3484,7 +3479,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             );
             const cell_width: i32 = @intCast(self.grid_metrics.cell_width);
 
-            const colors = self.myanmar_selection.items;
+            const colors = self.myanmar_backgrounds.items;
             var x: usize = 0;
             while (x < colors.len) {
                 const color = colors[x] orelse {

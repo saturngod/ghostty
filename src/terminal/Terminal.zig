@@ -113,6 +113,11 @@ flags: packed struct {
     // this to false and we act in mode 1 by default.
     modify_other_keys_2: bool = false,
 
+    /// While the cursor is at a shell prompt, treat every Myanmar mark as
+    /// zero width, matching shells that use the macOS C library widths.
+    /// See the `myanmar-prompt-width` config.
+    myanmar_prompt_zero_width: bool = false,
+
     /// The mouse event mode and format. These are set to the last
     /// set mode in modes. You can't get the right event/format to use
     /// based on modes alone because modes don't show you what order
@@ -638,6 +643,19 @@ fn printSliceOf(self: *Terminal, comptime Cp: type, cps: []const Cp) !void {
         // Single shifts require per-codepoint charset handling.
         const screen: *Screen = self.screens.active;
         if (screen.charset.single_shift != null) break :fast false;
+
+        // Myanmar marks at the prompt may need a different width than
+        // the table gives them, which only print() knows how to apply.
+        if (comptime Cp == u32) {
+            if (self.flags.myanmar_prompt_zero_width) {
+                for (cps) |cp| {
+                    if (unicode.myanmar.isMark(cp)) {
+                        if (self.cursorIsAtPrompt()) break :fast false;
+                        break;
+                    }
+                }
+            }
+        }
 
         break :fast true;
     };
@@ -1923,6 +1941,18 @@ pub fn print(self: *Terminal, c: u21) !void {
     else
         self.scrolling_region.right + 1;
 
+    // At a shell prompt, Myanmar marks can be zero width to match the
+    // shell (see the `myanmar-prompt-width` config). They always join the
+    // previous cell, whatever grapheme clustering would do.
+    if (c > 255 and
+        self.flags.myanmar_prompt_zero_width and
+        unicode.myanmar.isMark(c) and
+        self.cursorIsAtPrompt())
+    {
+        @branchHint(.unlikely);
+        return try self.printZeroWidthAttach(c);
+    }
+
     // Perform grapheme clustering if grapheme support is enabled (mode 2027).
     // This is MUCH slower than the normal path so the conditional below is
     // purposely ordered in least-likely to most-likely so we can drop out
@@ -2145,6 +2175,15 @@ pub fn print(self: *Terminal, c: u21) !void {
         // it.
         if (self.modes.get(.grapheme_cluster)) return;
 
+        return try self.printZeroWidthAttach(c);
+    }
+
+    return try self.printCodepoint(c, width, charset, right_limit);
+}
+
+/// Attach a zero-width codepoint to the cell before the cursor.
+fn printZeroWidthAttach(self: *Terminal, c: u21) !void {
+    {
         // If we have wraparound enabled and a pending wrap, the character
         // we're attaching to is still under the cursor. Otherwise, it's the
         // cell to the left.
@@ -2182,6 +2221,17 @@ pub fn print(self: *Terminal, c: u21) !void {
         try self.screens.active.appendGrapheme(prev, c);
         return;
     }
+}
+
+/// Print a codepoint of width 1 or 2 into new cells.
+fn printCodepoint(
+    self: *Terminal,
+    c: u21,
+    width: usize,
+    charset: charsets.Charset,
+    right_limit_initial: usize,
+) !void {
+    var right_limit = right_limit_initial;
 
     // We have a printable character, save it
     self.previous_char = c;
@@ -19569,4 +19619,53 @@ test "Terminal: eraseDisplay complete at input prompt copied from alt screen scr
     t.eraseDisplay(.complete, false);
 
     try testing.expect(t.screens.active.pages.total_rows > t.screens.active.pages.rows);
+}
+
+fn testMyanmarWidth(
+    zero_width: bool,
+    at_prompt: bool,
+    grapheme_cluster: bool,
+) !struct { x: usize, text_ok: bool } {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 30, .rows = 3 });
+    defer t.deinit(alloc);
+    t.flags.myanmar_prompt_zero_width = zero_width;
+    t.modes.set(.grapheme_cluster, grapheme_cluster);
+    if (at_prompt) t.screens.active.cursorSetSemanticContent(.{ .input = .clear_explicit });
+
+    // Through the VT stream, so the batched print path is used too.
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("မြန်မာ");
+
+    const str = try t.plainString(alloc);
+    defer alloc.free(str);
+    return .{
+        .x = t.screens.active.cursor.x,
+        .text_ok = std.mem.eql(u8, str, "မြန်မာ"),
+    };
+}
+
+test "Terminal: Myanmar marks are zero width at the prompt" {
+    // မ ြ န ် မ ာ: only the three consonants take a column, like zsh
+    // on macOS, with and without grapheme clustering.
+    for ([_]bool{ true, false }) |grapheme| {
+        const r = try testMyanmarWidth(true, true, grapheme);
+        try testing.expectEqual(@as(usize, 3), r.x);
+        try testing.expect(r.text_ok);
+    }
+}
+
+test "Terminal: Myanmar marks keep standard widths outside the prompt" {
+    // Command output (vim, Claude Code, ...) keeps the standard widths:
+    // မြ (wide) + န် + မ + ာ = 5 columns.
+    const r = try testMyanmarWidth(true, false, true);
+    try testing.expectEqual(@as(usize, 5), r.x);
+    try testing.expect(r.text_ok);
+}
+
+test "Terminal: Myanmar prompt widths can be turned off" {
+    const r = try testMyanmarWidth(false, true, true);
+    try testing.expectEqual(@as(usize, 5), r.x);
+    try testing.expect(r.text_ok);
 }
