@@ -912,10 +912,14 @@ palette: Palette = .{},
 /// state; running programs may override the cursor style using `DECSCUSR` (`CSI
 /// q`).
 ///
-/// If this is not set, the cursor blinks by default. Note that this is not the
-/// same as a "true" value, as noted below.
+/// The default is `false`: the cursor stays steady unless a program asks for
+/// blinking with `DECSCUSR`. A steady cursor is easier to follow while typing
+/// Myanmar text.
 ///
-/// If this is not set at all (`null`), then Ghostty will respect DEC Mode 12
+/// If this is set to blank, the cursor blinks by default. Note that this is
+/// not the same as a "true" value, as noted below.
+///
+/// If this is blank (`null`), then Ghostty will respect DEC Mode 12
 /// (AT&T cursor blink) as an alternate approach to turning blinking on/off. If
 /// this is set to any value other than null, DEC mode 12 will be ignored but
 /// `DECSCUSR` will still be respected.
@@ -925,7 +929,7 @@ palette: Palette = .{},
 ///   * ` ` (blank)
 ///   * `true`
 ///   * `false`
-@"cursor-style-blink": ?bool = null,
+@"cursor-style-blink": ?bool = false,
 
 /// The color of the text under the cursor. If this is not set, a default will
 /// be chosen.
