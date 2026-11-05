@@ -137,6 +137,73 @@ pub const Flow = struct {
     }
 };
 
+/// Squeezes a row whose Myanmar text would be drawn past the right edge.
+///
+/// Myanmar text is often drawn a little wider than the cells it has, and
+/// `Flow` pushes the rest of the row right to make room. At the end of a
+/// full row that pushes text past the edge of the window, where it can't
+/// be seen. When that happens, everything from the first Myanmar syllable
+/// on is moved closer together so the row ends at the edge. Text before
+/// it (such as a shell prompt) stays where it is.
+pub const Fit = struct {
+    /// Pixel position where squeezing starts.
+    anchor: i32 = 0,
+
+    /// Pixels after `anchor` are scaled by num / den.
+    num: i64 = 1,
+    den: i64 = 1,
+
+    pub const none: Fit = .{};
+
+    /// Work out the squeeze for a row, given its segments (see
+    /// `Flow.appendSegments`), its cells and its width in pixels.
+    pub fn init(
+        segments: []const Segment,
+        cells: []const terminal.page.Cell,
+        width: i32,
+        cell_width: i32,
+    ) Fit {
+        var anchor: ?i32 = null;
+        var end: i32 = 0;
+        for (segments) |seg| {
+            if (seg.snap) {
+                if (anchor == null) anchor = seg.px_start;
+                end = @max(end, seg.px_end);
+                continue;
+            }
+
+            // Other text ends at its last cell with text. Empty cells
+            // after the text don't count, even if they were pushed right.
+            var last: ?u16 = null;
+            var x = seg.grid_start;
+            while (x < seg.grid_end and x < cells.len) : (x += 1) {
+                if (cells[x].hasText()) last = x;
+            }
+            if (last) |l| end = @max(end, seg.px_start + (@as(i32, l) + 1 - seg.grid_start) * cell_width);
+        }
+
+        const a = anchor orelse return .none;
+        if (end <= width or a >= width) return .none;
+        return .{ .anchor = a, .num = width - a, .den = end - a };
+    }
+
+    /// Where pixel position `px` is drawn after squeezing.
+    pub fn apply(self: Fit, px: i32) i32 {
+        if (px <= self.anchor) return px;
+        const off: i64 = px - self.anchor;
+        return self.anchor + @as(i32, @intCast(@divFloor(off * self.num, self.den)));
+    }
+
+    /// Squeeze the drawn positions of `segments` the same way.
+    pub fn applySegments(self: Fit, segments: []Segment) void {
+        if (self.num == self.den) return;
+        for (segments) |*seg| {
+            seg.px_start = self.apply(seg.px_start);
+            seg.px_end = self.apply(seg.px_end);
+        }
+    }
+};
+
 /// Where a range of cells in a row is drawn, in pixels from the start of
 /// the row's grid. Rows without Myanmar text have no segments; their text
 /// is exactly on the grid.
@@ -469,4 +536,44 @@ test "myanmar flow: shared rows" {
     // Clearing a row makes it unchanged again.
     try rows.set(alloc, testing.io, 3, &.{});
     try testing.expectEqual(@as(f64, 25), rows.mouseToGrid(testing.io, 3, 25, 10));
+}
+
+test "myanmar flow: a row drawn past the edge is squeezed to fit" {
+    const testing = std.testing;
+
+    // "ab" then 4 Myanmar cells, 10px cells, a 60px (6 cell) row. The
+    // Myanmar text draws 50px wide, so the row ends at 70px.
+    var cells: [6]terminal.page.Cell = @splat(.init(0x1000));
+    cells[0] = .init('a');
+    cells[1] = .init('b');
+    const segs = [_]Segment{
+        .{ .grid_start = 0, .grid_end = 2, .px_start = 0, .px_end = 20, .snap = false },
+        .{ .grid_start = 2, .grid_end = 6, .px_start = 20, .px_end = 70, .snap = true },
+    };
+
+    const fit: Fit = .init(&segs, &cells, 60, 10);
+
+    // "ab" stays put and the Myanmar text now ends at the edge.
+    try testing.expectEqual(@as(i32, 0), fit.apply(0));
+    try testing.expectEqual(@as(i32, 20), fit.apply(20));
+    try testing.expectEqual(@as(i32, 60), fit.apply(70));
+
+    // Halfway through the Myanmar text stays halfway.
+    try testing.expectEqual(@as(i32, 40), fit.apply(45));
+}
+
+test "myanmar flow: a row that fits is not squeezed" {
+    const testing = std.testing;
+
+    var cells: [6]terminal.page.Cell = @splat(.init(0x1000));
+    cells[5] = .init(0);
+    const segs = [_]Segment{
+        .{ .grid_start = 0, .grid_end = 5, .px_start = 0, .px_end = 55, .snap = true },
+        // Empty cells pushed right past the edge don't count.
+        .{ .grid_start = 5, .grid_end = 6, .px_start = 55, .px_end = 65, .snap = false },
+    };
+
+    const fit: Fit = .init(&segs, &cells, 60, 10);
+    try testing.expectEqual(@as(i32, 58), fit.apply(58));
+    try testing.expectEqual(@as(i32, 65), fit.apply(65));
 }

@@ -3023,6 +3023,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 run_iter_opts,
                 cells_raw[0..cells_len],
             );
+
+            // Keep Myanmar text that runs past the right edge in the window.
+            const row_fit: myanmar_flow.Fit = .init(
+                myanmar_segments,
+                cells_raw[0..cells_len],
+                @intCast(@as(u32, state.cols) * self.grid_metrics.cell_width),
+                @intCast(self.grid_metrics.cell_width),
+            );
+            row_fit.applySegments(self.myanmar_segments.items);
+
             if (self.myanmar_rows) |rows| {
                 rows.set(self.alloc, global.io(), y, myanmar_segments) catch |err| {
                     log.warn("error storing Myanmar row layout err={}", .{err});
@@ -3409,6 +3419,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         shaper_cells_i += 1;
                     }) {
                         row_flow.track(run, shaped_cells[shaper_cells_i]);
+
+                        // Where the glyph's pen is, and where the row's
+                        // squeeze (if any) moves it.
+                        const pen: i32 = @as(i32, @intCast(x)) *
+                            @as(i32, @intCast(self.grid_metrics.cell_width)) +
+                            shaped_cells[shaper_cells_i].x_offset +
+                            row_flow.shift;
+                        const x_shift = row_flow.shift + row_fit.apply(pen) - pen;
+
                         self.addGlyph(
                             @intCast(x),
                             @intCast(y),
@@ -3418,7 +3437,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             shaper_run.?,
                             fg,
                             alpha,
-                            row_flow.shift,
+                            x_shift,
                         ) catch |err| {
                             log.warn(
                                 "error adding glyph to cell, will be invalid x={} y={}, err={}",
