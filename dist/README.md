@@ -113,7 +113,10 @@ on every push to `main`. You can also start it by hand from the Actions tab.
 | Linux x86_64 | `ubuntu-24.04` | `ghostty-linux-amd64`: `.deb` + AppImage |
 | Linux arm64 | `ubuntu-24.04-arm` | `ghostty-linux-arm64`: `.deb` + AppImage |
 
-Download the packages from the run's summary page, under Artifacts.
+After both builds pass, a `release` job publishes the packages to a `tip`
+pre-release on the Releases page. Each push to `main` replaces it, so `tip`
+always has the latest build. The packages are also kept on each run's
+summary page, under Artifacts.
 
 The macOS dmg is not built in CI. Build and sign it on your Mac with
 `dist/package/build.sh dmg`. The app is universal (Apple Silicon and Intel),

@@ -51,3 +51,39 @@ jobs:
             zig-out/packages/*.deb
             zig-out/packages/*.AppImage
           if-no-files-found: error
+
+  # Publish the packages to a rolling "tip" pre-release, replaced on every
+  # push to main, so they're downloadable from the Releases page.
+  release:
+    name: Publish tip release
+    needs: linux
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ghostty-linux-*
+          path: packages
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -lh packages
+          # Replace the previous tip release and its tag with this commit's.
+          gh release delete tip --yes --cleanup-tag || true
+          gh release create tip packages/* \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Ghostty tip (${GITHUB_SHA::9})" \
+            --notes "Linux packages built from ${GITHUB_SHA} on main.
+
+          - \`.deb\`: Debian/Ubuntu 26.04 or newer (\`sudo apt install ./ghostty_*.deb\`)
+          - \`.AppImage\`: \`chmod +x Ghostty-*.AppImage\` then run it
+
+          \`amd64\`/\`x86_64\` is for Intel/AMD PCs, \`arm64\`/\`aarch64\` is for ARM."
