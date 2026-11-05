@@ -216,6 +216,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         myanmar_backgrounds: std.ArrayList(?terminal.color.RGB) = .empty,
         myanmar_rects: std.ArrayList(shaderpkg.CellText) = .empty,
 
+        /// The marks of a Myanmar syllable split by a soft wrap, drawn at
+        /// the end of the row before them (see RunOptions.tail).
+        myanmar_tail: std.ArrayList(u21) = .empty,
+
         /// How many Myanmar background rectangles start each row's text
         /// list (see addMyanmarHighlights), indexed by viewport row.
         myanmar_rect_counts: std.ArrayList(usize) = .empty,
@@ -892,6 +896,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.myanmar_segments.deinit(self.alloc);
             self.myanmar_backgrounds.deinit(self.alloc);
             self.myanmar_rects.deinit(self.alloc);
+            self.myanmar_tail.deinit(self.alloc);
             self.myanmar_rect_counts.deinit(self.alloc);
 
             self.config.deinit();
@@ -2745,6 +2750,22 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             } else null;
 
+            // A soft wrap can split a Myanmar syllable between two rows.
+            // The marks on the second row are drawn at the end of the first
+            // (see rebuildRow), so if either row changed, redraw both.
+            for (1..row_len) |y| {
+                if (!row_raws[y - 1].wrap) continue;
+                if (!rebuild and !row_dirty[y - 1] and !row_dirty[y]) continue;
+                const split = myanmar_flow.splitSyllableCells(
+                    true,
+                    row_cells[y - 1].slice().items(.raw),
+                    row_cells[y].slice().items(.raw),
+                );
+                if (split == 0) continue;
+                row_dirty[y - 1] = true;
+                row_dirty[y] = true;
+            }
+
             for (
                 0..,
                 row_raws[0..row_len],
@@ -2754,6 +2775,35 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 row_highlights[0..row_len],
             ) |y_usize, row, *cells, *dirty, selection, *highlights| {
                 const y: terminal.size.CellCountInt = @intCast(y_usize);
+
+                // A Myanmar syllable split by a soft wrap: the marks at the
+                // start of the next row are drawn at the end of this one,
+                // and the ones at the start of this row were drawn above.
+                const skip_head: usize = if (y_usize > 0) myanmar_flow.splitSyllableCells(
+                    row_raws[y_usize - 1].wrap,
+                    row_cells[y_usize - 1].slice().items(.raw),
+                    cells.slice().items(.raw),
+                ) else 0;
+                const tail: []const u21 = tail: {
+                    if (y_usize + 1 >= row_len) break :tail &.{};
+                    const next = row_cells[y_usize + 1].slice();
+                    const n = myanmar_flow.splitSyllableCells(
+                        row.wrap,
+                        cells.slice().items(.raw),
+                        next.items(.raw),
+                    );
+                    if (n == 0) break :tail &.{};
+                    self.myanmar_tail.clearRetainingCapacity();
+                    const next_raw = next.items(.raw);
+                    const next_graphemes = next.items(.grapheme);
+                    for (0..n) |i| {
+                        self.myanmar_tail.append(self.alloc, @intCast(next_raw[i].codepoint())) catch break :tail &.{};
+                        if (next_raw[i].hasGrapheme()) {
+                            self.myanmar_tail.appendSlice(self.alloc, next_graphemes[i]) catch break :tail &.{};
+                        }
+                    }
+                    break :tail self.myanmar_tail.items;
+                };
 
                 if (!rebuild) {
                     // Only rebuild if we are doing a full rebuild or this row is dirty.
@@ -2774,6 +2824,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     selection,
                     highlights,
                     links,
+                    tail,
+                    skip_head,
                 ) catch |err| {
                     // This should never happen except under exceptional
                     // scenarios. In this case, we don't want to corrupt
@@ -2962,6 +3014,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             selection: ?[2]terminal.size.CellCountInt,
             highlights: *const std.ArrayList(terminal.RenderState.Highlight),
             links: *const terminal.RenderState.CellSet,
+            tail: []const u21,
+            skip_head: usize,
         ) !void {
             const state = &self.terminal_state;
 
@@ -3006,6 +3060,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .grid = self.font_grid,
                 .cells = cells_slice,
                 .selection = if (selection) |s| s else null,
+                .tail = tail,
+                .skip_head = skip_head,
 
                 // We want to do font shaping as long as the cursor is
                 // visible on this viewport.

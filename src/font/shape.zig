@@ -96,6 +96,15 @@ pub const RunOptions = struct {
     /// null.
     cursor_x: ?usize = null,
 
+    /// Codepoints to shape after the row's last cell. When a soft wrap
+    /// splits a Myanmar syllable, the marks that went to the next row are
+    /// drawn here so the syllable stays whole. See `skip_head`.
+    tail: []const u21 = &.{},
+
+    /// How many cells at the start of the row to skip because they were
+    /// drawn at the end of the previous row (its `tail`).
+    skip_head: usize = 0,
+
     /// Apply the font break configuration to the run.
     pub fn applyBreakConfig(
         self: *RunOptions,

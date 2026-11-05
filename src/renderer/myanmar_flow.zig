@@ -165,10 +165,18 @@ pub const Fit = struct {
     ) Fit {
         var anchor: ?i32 = null;
         var end: i32 = 0;
+
+        // Width of whatever is drawn last. It keeps its size and ends at
+        // the edge, so a syllable in the last column isn't cut off.
+        var last_width: i32 = cell_width;
+
         for (segments) |seg| {
             if (seg.snap) {
                 if (anchor == null) anchor = seg.px_start;
-                end = @max(end, seg.px_end);
+                if (seg.px_end >= end) {
+                    end = seg.px_end;
+                    last_width = seg.px_end - seg.px_start;
+                }
                 continue;
             }
 
@@ -179,12 +187,28 @@ pub const Fit = struct {
             while (x < seg.grid_end and x < cells.len) : (x += 1) {
                 if (cells[x].hasText()) last = x;
             }
-            if (last) |l| end = @max(end, seg.px_start + (@as(i32, l) + 1 - seg.grid_start) * cell_width);
+            if (last) |l| {
+                const text_end = seg.px_start + (@as(i32, l) + 1 - seg.grid_start) * cell_width;
+                if (text_end >= end) {
+                    end = text_end;
+                    last_width = cell_width;
+                }
+            }
         }
 
-        const a = anchor orelse return .none;
-        if (end <= width or a >= width) return .none;
-        return .{ .anchor = a, .num = width - a, .den = end - a };
+        var a = anchor orelse return .none;
+        if (end <= width) return .none;
+
+        // Squeeze by at most a fifth where possible. If the Myanmar text
+        // starts too close to the edge for that, start squeezing earlier
+        // in the row: scale = (width - last - a) / (end - last - a) is at
+        // least 4/5 when a <= 5 * width - 4 * end - last.
+        a = @max(0, @min(a, 5 * width - 4 * end - last_width));
+
+        const num = width - last_width - a;
+        const den = end - last_width - a;
+        if (num <= 0 or den <= 0) return .none;
+        return .{ .anchor = a, .num = num, .den = den };
     }
 
     /// Where pixel position `px` is drawn after squeezing.
@@ -203,6 +227,40 @@ pub const Fit = struct {
         }
     }
 };
+
+/// How many cells at the start of `cells` are Myanmar marks. When the row
+/// before is soft-wrapped and ends in Myanmar text, these marks belong to
+/// its last syllable: a wrap split the syllable between the rows.
+pub fn leadingMarks(cells: []const terminal.page.Cell) usize {
+    var n: usize = 0;
+    while (n < cells.len) : (n += 1) {
+        const cell = cells[n];
+        if (!cell.hasText() or cell.wide != .narrow) break;
+        if (!myanmar.isMark(cell.codepoint())) break;
+    }
+    return n;
+}
+
+/// Whether the last cell with text in `cells` is Myanmar.
+pub fn endsWithMyanmar(cells: []const terminal.page.Cell) bool {
+    var i = cells.len;
+    while (i > 0) {
+        i -= 1;
+        if (cells[i].hasText()) return myanmar.isMyanmar(cells[i].codepoint());
+    }
+    return false;
+}
+
+/// How many leading cells of a row continue a syllable from the row
+/// before it, given whether that row is soft-wrapped and its cells.
+pub fn splitSyllableCells(
+    prev_wrap: bool,
+    prev_cells: []const terminal.page.Cell,
+    cells: []const terminal.page.Cell,
+) usize {
+    if (!prev_wrap or !endsWithMyanmar(prev_cells)) return 0;
+    return leadingMarks(cells);
+}
 
 /// Where a range of cells in a row is drawn, in pixels from the start of
 /// the row's grid. Rows without Myanmar text have no segments; their text
@@ -541,25 +599,45 @@ test "myanmar flow: shared rows" {
 test "myanmar flow: a row drawn past the edge is squeezed to fit" {
     const testing = std.testing;
 
-    // "ab" then 4 Myanmar cells, 10px cells, a 60px (6 cell) row. The
-    // Myanmar text draws 50px wide, so the row ends at 70px.
-    var cells: [6]terminal.page.Cell = @splat(.init(0x1000));
+    // "ab" then two Myanmar syllables in a 100px (10 cell) row of 10px
+    // cells. They draw 40px and 50px wide, so the row ends at 110px.
+    var cells: [10]terminal.page.Cell = @splat(.init(0x1000));
     cells[0] = .init('a');
     cells[1] = .init('b');
     const segs = [_]Segment{
         .{ .grid_start = 0, .grid_end = 2, .px_start = 0, .px_end = 20, .snap = false },
-        .{ .grid_start = 2, .grid_end = 6, .px_start = 20, .px_end = 70, .snap = true },
+        .{ .grid_start = 2, .grid_end = 5, .px_start = 20, .px_end = 60, .snap = true },
+        .{ .grid_start = 5, .grid_end = 10, .px_start = 60, .px_end = 110, .snap = true },
     };
 
-    const fit: Fit = .init(&segs, &cells, 60, 10);
+    const fit: Fit = .init(&segs, &cells, 100, 10);
 
-    // "ab" stays put and the Myanmar text now ends at the edge.
+    // The last syllable keeps its width and ends at the edge.
+    try testing.expectEqual(@as(i32, 50), fit.apply(60));
+
+    // Squeezing starts early enough to stay within a fifth: here from
+    // 10px, so "a" stays put and "b" moves very little.
     try testing.expectEqual(@as(i32, 0), fit.apply(0));
-    try testing.expectEqual(@as(i32, 20), fit.apply(20));
-    try testing.expectEqual(@as(i32, 60), fit.apply(70));
+    try testing.expectEqual(@as(i32, 10), fit.apply(10));
+    try testing.expectEqual(@as(i32, 18), fit.apply(20));
+}
 
-    // Halfway through the Myanmar text stays halfway.
-    try testing.expectEqual(@as(i32, 40), fit.apply(45));
+test "myanmar flow: a syllable in the last column is kept whole" {
+    const testing = std.testing;
+
+    // 9 letters then a 25px syllable in the last 10px cell of a 100px row.
+    var cells: [10]terminal.page.Cell = @splat(.init('x'));
+    cells[9] = .init(0x1000);
+    const segs = [_]Segment{
+        .{ .grid_start = 0, .grid_end = 9, .px_start = 0, .px_end = 90, .snap = false },
+        .{ .grid_start = 9, .grid_end = 10, .px_start = 90, .px_end = 115, .snap = true },
+    };
+
+    const fit: Fit = .init(&segs, &cells, 100, 10);
+
+    // The syllable starts 25px before the edge, so it ends at the edge.
+    try testing.expectEqual(@as(i32, 75), fit.apply(90));
+    try testing.expectEqual(@as(i32, 0), fit.apply(0));
 }
 
 test "myanmar flow: a row that fits is not squeezed" {
@@ -576,4 +654,24 @@ test "myanmar flow: a row that fits is not squeezed" {
     const fit: Fit = .init(&segs, &cells, 60, 10);
     try testing.expectEqual(@as(i32, 58), fit.apply(58));
     try testing.expectEqual(@as(i32, 65), fit.apply(65));
+}
+
+test "myanmar flow: marks a wrap moved to the next row" {
+    const testing = std.testing;
+
+    // ရေးသာ | း...: the row ends in Myanmar and the next starts with း.
+    var prev: [4]terminal.page.Cell = undefined;
+    for (&prev, [_]u21{ 0x101B, 0x1031, 0x1038, 0x101E }) |*c, cp| c.* = .init(cp);
+    var next: [3]terminal.page.Cell = undefined;
+    for (&next, [_]u21{ 0x102C, 0x1038, 0x1000 }) |*c, cp| c.* = .init(cp);
+
+    // ာ and း continue the syllable; က starts a new one.
+    try testing.expectEqual(@as(usize, 2), splitSyllableCells(true, &prev, &next));
+
+    // Not soft-wrapped: a new line that happens to start with a mark.
+    try testing.expectEqual(@as(usize, 0), splitSyllableCells(false, &prev, &next));
+
+    // The row before ends in other text.
+    var ascii: [2]terminal.page.Cell = .{ .init('a'), .init('b') };
+    try testing.expectEqual(@as(usize, 0), splitSyllableCells(true, &ascii, &next));
 }

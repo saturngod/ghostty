@@ -67,6 +67,9 @@ pub const RunIterator = struct {
             (cells[self.i].hasStyling() and
                 styles[self.i].flags.invisible)) self.i += 1;
 
+        // Cells drawn at the end of the previous row (see RunOptions.tail).
+        if (self.i < self.opts.skip_head) self.i = self.opts.skip_head;
+
         // We're over at the max
         if (self.i >= max) return null;
 
@@ -297,6 +300,12 @@ pub const RunIterator = struct {
                     try self.addCodepoint(&hasher, cp, @intCast(cluster));
                 }
             }
+
+            // The rest of a syllable that a soft wrap moved to the next
+            // row belongs to the last cell.
+            if (j == max - 1) for (self.opts.tail) |cp| {
+                try self.addCodepoint(&hasher, cp, @intCast(cluster));
+            };
         }
 
         // Finalize our buffer

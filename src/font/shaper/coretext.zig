@@ -1017,6 +1017,44 @@ test "run iterator: empty cells with background set" {
     }
 }
 
+test "run iterator: tail and skipped head of a row" {
+    // A soft wrap can split a Myanmar syllable between rows. The marks on
+    // the next row are shaped after this row's last cell (tail), and the
+    // next row skips them (skip_head). Plain letters show the mechanics.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var testdata = try testShaper(alloc);
+    defer testdata.deinit();
+
+    var t = try terminal.Terminal.init(testing.io, alloc, .{ .cols = 5, .rows = 3 });
+    defer t.deinit(alloc);
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("ABC");
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var shaper = &testdata.shaper;
+    var it = shaper.runIterator(.{
+        .grid = testdata.grid,
+        .cells = state.row_data.get(0).cells.slice(),
+        .tail = &.{'D'},
+        .skip_head = 1,
+    });
+
+    const run = (try it.next(alloc)).?;
+    try testing.expectEqual(@as(u16, 1), run.offset);
+    const cells = try shaper.shape(run);
+
+    // B, C and the tail D, which belongs to C's cell.
+    try testing.expectEqual(@as(usize, 3), cells.len);
+    try testing.expectEqual(cells[1].x, cells[2].x);
+    try testing.expect(try it.next(alloc) == null);
+}
+
 test "shape" {
     const testing = std.testing;
     const alloc = testing.allocator;
