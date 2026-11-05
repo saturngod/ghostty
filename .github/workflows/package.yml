@@ -1,89 +1,44 @@
-# Builds the Linux packages (.deb and AppImage) for x86_64 and arm64 on every
-# push to main, on native runners. Packages are uploaded as workflow artifacts.
-#
-# The macOS dmg is built and signed locally with `dist/package/build.sh dmg`.
+# On every push to main: build the Linux .deb and AppImage for x86_64 and
+# arm64, and put them on the "tip" release (Releases page).
 name: Package
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 concurrency:
-  group: package-${{ github.ref }}
+  group: package
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   linux:
-    name: Linux ${{ matrix.arch }} (deb + AppImage)
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
     strategy:
-      fail-fast: false
       matrix:
         include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
 
-      # --jobs 2: compiling glslang for x86_64 alone needs ~8 GB of RAM, and
-      # these runners have 16 GB.
-      - name: Build deb and AppImage
+      - name: Build
         run: dist/package/build.sh linux --arch ${{ matrix.arch }} --jobs 2
 
-      - name: Upload packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: ghostty-linux-${{ matrix.arch }}
-          path: |
-            zig-out/packages/*.deb
-            zig-out/packages/*.AppImage
-          if-no-files-found: error
-
-  # Publish the packages to a rolling "tip" pre-release, replaced on every
-  # push to main, so they're downloadable from the Releases page.
-  release:
-    name: Publish tip release
-    needs: linux
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Download packages
-        uses: actions/download-artifact@v4
-        with:
-          pattern: ghostty-linux-*
-          path: packages
-          merge-multiple: true
-
-      - name: Publish release
+      - name: Upload to tip release
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: |
-          ls -lh packages
-          # Replace the previous tip release and its tag with this commit's.
-          gh release delete tip --yes --cleanup-tag || true
-          gh release create tip packages/* \
-            --target "$GITHUB_SHA" \
-            --prerelease \
-            --title "Ghostty tip (${GITHUB_SHA::9})" \
-            --notes "Linux packages built from ${GITHUB_SHA} on main.
+          cd zig-out/packages
+          mv *.deb ghostty_${{ matrix.arch }}.deb
+          mv *.AppImage Ghostty-${{ matrix.arch }}.AppImage
 
-          - \`.deb\`: Debian/Ubuntu 26.04 or newer (\`sudo apt install ./ghostty_*.deb\`)
-          - \`.AppImage\`: \`chmod +x Ghostty-*.AppImage\` then run it
-
-          \`amd64\`/\`x86_64\` is for Intel/AMD PCs, \`arm64\`/\`aarch64\` is for ARM."
+          git tag -f tip && git push -f origin tip
+          gh release create tip --prerelease --title "Ghostty tip" \
+            --notes "Latest Linux build from main." || true
+          gh release upload tip ghostty_${{ matrix.arch }}.deb Ghostty-${{ matrix.arch }}.AppImage --clobber
