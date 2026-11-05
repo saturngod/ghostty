@@ -519,26 +519,26 @@ language: ?[:0]const u8 = null,
 ///
 /// Shells place the cursor using the C library's idea of character
 /// widths, and those differ between systems. If Ghostty disagrees with
-/// the shell, Myanmar text you type gets redrawn in the wrong place and
-/// the cursor can't reach the start of the line.
+/// the shell, Myanmar text you type can be redrawn in the wrong place
+/// when you edit the line.
 ///
 /// Valid values:
 ///
-/// * `zero` - Every Myanmar mark is 0 columns wide. This matches the C
-///   library on macOS. This is the default on macOS.
-///
 /// * `standard` - Use the same widths as everywhere else (spacing marks
-///   are 1 column). This matches glibc on Linux. This is the default on
-///   other systems.
+///   are 1 column). This is close to how wide Myanmar text is drawn, so
+///   long lines wrap at the edge of the window. This matches glibc on
+///   Linux. This is the default.
+///
+/// * `zero` - Every Myanmar mark is 0 columns wide. This matches the C
+///   library on macOS, so zsh keeps the cursor in the right place while
+///   you edit. But the text is drawn much wider than the columns it is
+///   given, so long lines run past the edge of the window instead of
+///   wrapping.
 ///
 /// This only applies while the cursor is at a prompt, which requires shell
 /// integration. Programs you run, such as editors or Claude Code, always
-/// get the standard widths. Use `standard` if you mostly work over SSH on
-/// Linux machines from macOS.
-@"myanmar-prompt-width": MyanmarPromptWidth = switch (builtin.os.tag) {
-    .macos => .zero,
-    else => .standard,
-},
+/// get the standard widths.
+@"myanmar-prompt-width": MyanmarPromptWidth = .standard,
 
 /// FreeType load flags to enable. The format of this is a list of flags to
 /// enable separated by commas. If you prefix a flag with `no-` then it is
