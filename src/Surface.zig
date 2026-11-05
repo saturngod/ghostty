@@ -95,6 +95,10 @@ renderer: Renderer,
 /// The render state
 renderer_state: rendererpkg.State,
 
+/// Where Myanmar text is drawn in each viewport row. Written by the renderer
+/// and used here to map the mouse to the text that is on screen.
+myanmar_rows: *rendererpkg.MyanmarRows,
+
 /// The renderer thread manager
 renderer_thread: rendererpkg.Thread,
 
@@ -569,6 +573,11 @@ pub fn init(
         break :device device;
     };
 
+    // Shared between the renderer and this surface; see myanmar_rows.
+    const myanmar_rows = try alloc.create(rendererpkg.MyanmarRows);
+    myanmar_rows.* = .{};
+    errdefer alloc.destroy(myanmar_rows);
+
     // Create our terminal grid with the initial size
     const app_mailbox: App.Mailbox = .{ .rt_app = rt_app, .mailbox = &app.mailbox };
     var renderer_impl = renderer: {
@@ -585,6 +594,7 @@ pub fn init(
             .surface_mailbox = .{ .surface = self, .app = app_mailbox },
             .rt_surface = rt_surface,
             .thread = &self.renderer_thread,
+            .myanmar_rows = myanmar_rows,
         });
     };
     errdefer renderer_impl.deinit();
@@ -634,6 +644,7 @@ pub fn init(
             .mutex = mutex,
             .terminal = &self.io.terminal,
         },
+        .myanmar_rows = myanmar_rows,
         .renderer_thr = undefined,
         .mouse = .{},
         .keyboard = .{},
@@ -873,6 +884,8 @@ pub fn deinit(self: *Surface) void {
     // Clean up our render state
     if (self.renderer_state.preedit) |p| self.alloc.free(p.codepoints);
     self.alloc.destroy(self.renderer_state.mutex);
+    self.myanmar_rows.deinit(self.alloc);
+    self.alloc.destroy(self.myanmar_rows);
     self.config.deinit();
 
     log.info("surface closed id={x}", .{self.id});
@@ -1264,7 +1277,7 @@ fn selectionScrollTick(self: *Surface) !void {
 
     const selection = self.mouse.selection_gesture.autoscrollTick(t, .{
         .viewport = pos_vp,
-        .xpos = pos.x,
+        .xpos = self.myanmarMouseX(pos.x, pos.y),
         .ypos = pos.y,
         .rectangle = SurfaceMouse.isRectangleSelectState(self.mouse.mods),
         .word_boundary_codepoints = self.config.selection_word_chars,
@@ -4124,7 +4137,7 @@ pub fn mouseButtonCallback(
         var press_selection = try self.mouse.selection_gesture.press(t, .{
             .time = std.Io.Timestamp.now(global.io(), .awake),
             .pin = pin,
-            .xpos = pos.x,
+            .xpos = self.myanmarMouseX(pos.x, pos.y),
             .ypos = pos.y,
             .max_distance = @floatFromInt(self.size.cell.width),
             .repeat_interval = self.config.mouse_interval,
@@ -4833,7 +4846,7 @@ pub fn cursorPosCallback(
         // Perform our drag behavior in our gesture handler.
         const drag_selection = self.mouse.selection_gesture.drag(t, .{
             .pin = pin,
-            .xpos = pos.x,
+            .xpos = self.myanmarMouseX(pos.x, pos.y),
             .ypos = pos.y,
             .rectangle = SurfaceMouse.isRectangleSelectState(self.mouse.mods),
             .word_boundary_codepoints = self.config.selection_word_chars,
@@ -4891,9 +4904,27 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
     // Get our grid cell
-    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
+    const coord: rendererpkg.Coordinate = .{ .surface = .{
+        .x = self.myanmarMouseX(xpos, ypos),
+        .y = ypos,
+    } };
     const grid = coord.convert(.grid, self.size).grid;
     return .{ .x = grid.x, .y = grid.y };
+}
+
+/// Myanmar text isn't drawn exactly on its cells, so map a mouse x position
+/// to the grid position of the text under it. Returns xpos unchanged on rows
+/// without Myanmar text. See renderer/myanmar_flow.zig.
+fn myanmarMouseX(self: Surface, xpos: f64, ypos: f64) f64 {
+    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
+    const row = coord.convert(.grid, self.size).grid.y;
+    const padding_left: f64 = @floatFromInt(self.size.padding.left);
+    return self.myanmar_rows.mouseToGrid(
+        global.io(),
+        row,
+        xpos - padding_left,
+        @floatFromInt(self.size.cell.width),
+    ) + padding_left;
 }
 
 /// Scroll to the bottom of the viewport.

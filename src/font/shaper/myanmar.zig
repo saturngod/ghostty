@@ -164,6 +164,16 @@ pub fn layout(
     const snaps = try alloc.alloc(bool, max_cluster + 1);
     defer alloc.free(snaps);
     @memset(snaps, true);
+
+    // Spaces come from the Myanmar font, whose space is usually narrower
+    // than a cell. Give them at least a full cell, like the space in the
+    // terminal font, so words don't run together.
+    const spaces = try alloc.alloc(bool, max_cluster + 1);
+    defer alloc.free(spaces);
+    @memset(spaces, false);
+    for (codepoints) |c| {
+        if (c.codepoint == ' ') spaces[c.cluster] = true;
+    }
     {
         var current: u32 = 0;
         var prev_cluster: ?u32 = null;
@@ -209,12 +219,16 @@ pub fn layout(
             std.math.minInt(i16),
             std.math.maxInt(i16),
         ));
+        const advance = if (spaces[g.cluster])
+            @max(g.advance, cell_width)
+        else
+            g.advance;
         cell.advance = @intFromFloat(std.math.clamp(
-            @round(g.advance),
+            @round(advance),
             0,
             std.math.maxInt(u16),
         ));
-        pen_end = @max(pen_end, g.pen + g.advance + shift);
+        pen_end = @max(pen_end, g.pen + advance + shift);
     }
 }
 
@@ -366,6 +380,30 @@ test "myanmar: layout flows syllables inside a word" {
     try testing.expectEqual(@as(i16, -20), cells[4].x_offset);
     try testing.expectEqual(@as(u16, 4), cells[5].x);
     try testing.expectEqual(@as(i16, -12), cells[5].x_offset);
+}
+
+test "myanmar: spaces are at least one cell wide" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // A word wider than its cells, a narrow space, then the next word.
+    // 10px cells. ဗာ (cells 0-1) is 26px, the space glyph is only 4px.
+    const cps = testCodepoints("ဗာ ဒံ");
+    const glyphs = [_]Glyph{
+        .{ .cluster = 0, .pen = 0, .x = 0, .advance = 16 },
+        .{ .cluster = 1, .pen = 16, .x = 16, .advance = 10 },
+        .{ .cluster = 2, .pen = 26, .x = 26, .advance = 4 },
+        .{ .cluster = 3, .pen = 30, .x = 30, .advance = 10 },
+        .{ .cluster = 4, .pen = 40, .x = 36, .advance = 0 },
+    };
+    var cells: [glyphs.len]font.shape.Cell = @splat(.{ .x = 0, .glyph_index = 0 });
+    try layout(alloc, &cps, &glyphs, &cells, 10);
+
+    // The space starts at 26px and takes a full 10px cell, so ဒံ starts
+    // at 36px, not 30px.
+    try testing.expectEqual(@as(u16, 10), cells[2].advance);
+    try testing.expectEqual(@as(u16, 3), cells[3].x);
+    try testing.expectEqual(@as(i16, 6), cells[3].x_offset);
 }
 
 test "myanmar: layout snaps words to the grid when there is room" {

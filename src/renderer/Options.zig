@@ -26,3 +26,7 @@ rt_surface: *apprt.Surface,
 
 /// The renderer thread.
 thread: *renderer.Thread,
+
+/// Where Myanmar text is drawn in each viewport row, shared with the
+/// surface so it can map the mouse to the text on screen.
+myanmar_rows: ?*@import("myanmar_flow.zig").Rows = null,

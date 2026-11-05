@@ -19,7 +19,8 @@ const constraintWidth = cellpkg.constraintWidth;
 const isCovering = cellpkg.isCovering;
 const rowNeverExtendBg = @import("row.zig").neverExtendBg;
 const Overlay = @import("Overlay.zig");
-const MyanmarFlow = @import("myanmar_flow.zig").Flow;
+const myanmar_flow = @import("myanmar_flow.zig");
+const MyanmarFlow = myanmar_flow.Flow;
 const imagepkg = @import("image.zig");
 const ImageState = imagepkg.State;
 const shadertoy = @import("shadertoy.zig");
@@ -206,6 +207,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         font_grid: *font.SharedGrid,
         font_shaper: font.Shaper,
         font_shaper_cache: font.ShaperCache,
+
+        /// Myanmar layout state (see myanmar_flow.zig). The rows are
+        /// shared with the surface; the lists are scratch space reused
+        /// for every row.
+        myanmar_rows: ?*myanmar_flow.Rows = null,
+        myanmar_segments: std.ArrayList(myanmar_flow.Segment) = .empty,
+        myanmar_selection: std.ArrayList(?terminal.color.RGB) = .empty,
+        myanmar_rects: std.ArrayList(shaderpkg.CellText) = .empty,
 
         /// The images that we may render.
         images: ImageState = .empty,
@@ -745,6 +754,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .alloc = alloc,
                 .config = options.config,
                 .surface_mailbox = options.surface_mailbox,
+                .myanmar_rows = options.myanmar_rows,
                 .grid_metrics = font_critical.metrics,
                 .size = options.size,
                 .focused = true,
@@ -867,6 +877,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             self.font_shaper.deinit();
             self.font_shaper_cache.deinit(self.alloc);
+            self.myanmar_segments.deinit(self.alloc);
+            self.myanmar_selection.deinit(self.alloc);
+            self.myanmar_rects.deinit(self.alloc);
 
             self.config.deinit();
             self.api.deinit();
@@ -2986,6 +2999,24 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 },
             };
             run_iter_opts.applyBreakConfig(self.config.font_shaping_break);
+
+            // Where Myanmar text in this row is really drawn. Empty for rows
+            // without Myanmar text, which stay exactly on the grid.
+            const myanmar_segments = try self.myanmarSegments(
+                run_iter_opts,
+                cells_raw[0..cells_len],
+            );
+            if (self.myanmar_rows) |rows| {
+                rows.set(self.alloc, global.io(), y, myanmar_segments) catch |err| {
+                    log.warn("error storing Myanmar row layout err={}", .{err});
+                };
+            }
+            const myanmar_row = myanmar_segments.len > 0;
+            if (myanmar_row) {
+                self.myanmar_selection.clearRetainingCapacity();
+                try self.myanmar_selection.appendNTimes(self.alloc, null, cells_len);
+            }
+
             var run_iter = self.font_shaper.runIterator(run_iter_opts);
             var shaper_run: ?font.shape.TextRun = try run_iter.next(self.alloc);
             var shaper_cells: ?[]const font.shape.Cell = null;
@@ -2993,7 +3024,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Pushes text right after Myanmar words that are wider than
             // their cells, instead of drawing over them.
-            var myanmar_flow: MyanmarFlow = .init(self.grid_metrics.cell_width);
+            var row_flow: MyanmarFlow = .init(self.grid_metrics.cell_width);
 
             for (
                 0..,
@@ -3118,6 +3149,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .bold = self.config.bold_color,
                 });
 
+                // The background color for the cell when it isn't selected.
+                const bg_plain = if (style.flags.inverse != isCovering(cell.codepoint()))
+                    fg_style
+                else
+                    bg_style;
+
                 // The final background color for the cell.
                 const bg = switch (selected) {
                     // If we have an explicit selection background color
@@ -3197,9 +3234,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Foreground alpha for this cell.
                 const alpha: u8 = if (style.flags.faint) self.config.faint_opacity else 255;
 
+                // In rows with Myanmar text, the text isn't exactly on its
+                // cells, so selection and search highlights are drawn at the
+                // text's real position after the row (see below) instead of
+                // as the cell background.
+                const highlight_on_grid = selected != .false and !myanmar_row;
+                if (myanmar_row and selected != .false) {
+                    self.myanmar_selection.items[x] = bg orelse state.colors.foreground;
+                }
+
                 // Set the cell's background color.
                 {
-                    const rgb = bg orelse state.colors.background;
+                    const rgb = (if (myanmar_row) bg_plain else bg) orelse state.colors.background;
 
                     // Determine our background alpha. If we have transparency configured
                     // then this is dynamic depending on some situations. This is all
@@ -3209,7 +3255,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         const default: u8 = 255;
 
                         // Cells that are selected should be fully opaque.
-                        if (selected != .false) break :bg_alpha default;
+                        if (highlight_on_grid) break :bg_alpha default;
 
                         // Cells that are reversed should be fully opaque.
                         if (style.flags.inverse) break :bg_alpha default;
@@ -3324,7 +3370,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         };
 
                     const shaped_cells = shaper_cells orelse break :glyphs;
-                    myanmar_flow.enter(run, cells_raw);
+                    row_flow.enter(run, cells_raw);
 
                     // If there are no shaper cells for this run, ignore it.
                     // This can occur for runs of empty cells, and is fine.
@@ -3343,7 +3389,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         run.offset + shaped_cells[shaper_cells_i].x == x) : ({
                         shaper_cells_i += 1;
                     }) {
-                        myanmar_flow.track(run, shaped_cells[shaper_cells_i]);
+                        row_flow.track(run, shaped_cells[shaper_cells_i]);
                         self.addGlyph(
                             @intCast(x),
                             @intCast(y),
@@ -3353,7 +3399,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             shaper_run.?,
                             fg,
                             alpha,
-                            myanmar_flow.shift,
+                            row_flow.shift,
                         ) catch |err| {
                             log.warn(
                                 "error adding glyph to cell, will be invalid x={} y={}, err={}",
@@ -3376,6 +3422,115 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     );
                 };
             }
+
+            if (myanmar_row) self.addMyanmarHighlights(y, myanmar_segments) catch |err| {
+                log.warn("error adding Myanmar highlights y={} err={}", .{ y, err });
+            };
+        }
+
+        /// Shape a run, using the shaping cache when possible.
+        fn shapeRun(self: *Self, run: font.shape.TextRun) ![]const font.shape.Cell {
+            if (self.font_shaper_cache.get(run)) |cells| return cells;
+            const cells = try self.font_shaper.shape(run);
+            self.font_shaper_cache.put(self.alloc, run, cells) catch |err| {
+                log.warn("error caching font shaping results err={}", .{err});
+            };
+            return cells;
+        }
+
+        /// Work out where the text of a row that contains Myanmar text is
+        /// drawn (see myanmar_flow.zig). Returns no segments for rows
+        /// without Myanmar text. The result is valid until the next call.
+        fn myanmarSegments(
+            self: *Self,
+            run_iter_opts: font.shape.RunOptions,
+            cells_raw: []const terminal.page.Cell,
+        ) ![]const myanmar_flow.Segment {
+            self.myanmar_segments.clearRetainingCapacity();
+
+            const has_myanmar = for (cells_raw) |cell| {
+                if (font.shape.myanmar.isMyanmar(cell.codepoint())) break true;
+            } else false;
+            if (!has_myanmar) return self.myanmar_segments.items;
+
+            // Lay the row out exactly like rebuildRow will, with the same
+            // runs (so shaping comes from the cache the second time).
+            var flow: MyanmarFlow = .init(self.grid_metrics.cell_width);
+            var it = self.font_shaper.runIterator(run_iter_opts);
+            while (try it.next(self.alloc)) |run| {
+                const shaped = try self.shapeRun(run);
+                flow.enter(run, cells_raw);
+                for (shaped) |c| flow.track(run, c);
+                try flow.appendSegments(self.alloc, &self.myanmar_segments, run, shaped);
+            }
+
+            return self.myanmar_segments.items;
+        }
+
+        /// Draw the selection and search highlights of a Myanmar row at the
+        /// position of its text, underneath the text.
+        fn addMyanmarHighlights(
+            self: *Self,
+            y: terminal.size.CellCountInt,
+            segments: []const myanmar_flow.Segment,
+        ) !void {
+            self.myanmar_rects.clearRetainingCapacity();
+
+            const render = try self.font_grid.renderGlyph(
+                self.alloc,
+                font.sprite_index,
+                @backingInt(font.Sprite.cursor_rect),
+                .{ .cell_width = 1, .grid_metrics = self.grid_metrics },
+            );
+            const cell_width: i32 = @intCast(self.grid_metrics.cell_width);
+
+            const colors = self.myanmar_selection.items;
+            var x: usize = 0;
+            while (x < colors.len) {
+                const color = colors[x] orelse {
+                    x += 1;
+                    continue;
+                };
+
+                // A run of cells with the same highlight color.
+                const start = x;
+                while (x < colors.len and colors[x] != null and
+                    std.meta.eql(colors[x].?, color)) x += 1;
+                const px = myanmar_flow.cellsToPx(
+                    segments,
+                    @intCast(start),
+                    @intCast(x - 1),
+                    cell_width,
+                );
+
+                // Cover [px[0], px[1]) with cell-sized rectangles, the last
+                // one aligned to the end.
+                var left = px[0];
+                while (true) {
+                    const rect_x = @min(left, @max(px[0], px[1] - cell_width));
+                    try self.myanmar_rects.append(self.alloc, .{
+                        .atlas = .grayscale,
+                        .bools = .{ .no_min_contrast = true },
+                        .grid_pos = .{ 0, y },
+                        .color = .{ color.r, color.g, color.b, 255 },
+                        .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
+                        .glyph_size = .{ render.glyph.width, render.glyph.height },
+                        .bearings = .{
+                            @intCast(render.glyph.offset_x + rect_x),
+                            @intCast(render.glyph.offset_y),
+                        },
+                    });
+                    left += cell_width;
+                    if (left >= px[1]) break;
+                }
+            }
+
+            // Underneath everything else in the row.
+            try self.cells.fg_rows[@as(usize, y) + 1].insertSlice(
+                self.alloc,
+                0,
+                self.myanmar_rects.items,
+            );
         }
 
         /// Add an underline decoration to the specified cell
@@ -3620,6 +3775,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 },
             };
 
+            // Follow Myanmar text that isn't drawn exactly on its cells.
+            const myanmar_shift: i32 = if (self.myanmar_rows) |rows| rows.cellShift(
+                global.io(),
+                cursor_vp.y,
+                x,
+                @intCast(self.grid_metrics.cell_width),
+            ) else 0;
+
             self.cells.setCursor(.{
                 .atlas = .grayscale,
                 .bools = .{ .is_cursor_glyph = true },
@@ -3628,7 +3791,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
-                    @intCast(render.glyph.offset_x),
+                    @intCast(render.glyph.offset_x + myanmar_shift),
                     @intCast(render.glyph.offset_y),
                 },
             }, cursor_style);

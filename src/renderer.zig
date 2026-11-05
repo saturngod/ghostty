@@ -21,6 +21,7 @@ pub const Options = @import("renderer/Options.zig");
 pub const Overlay = @import("renderer/Overlay.zig");
 pub const Thread = @import("renderer/Thread.zig");
 pub const State = @import("renderer/State.zig");
+pub const MyanmarRows = @import("renderer/myanmar_flow.zig").Rows;
 pub const CursorStyle = cursor.Style;
 pub const Message = message.Message;
 pub const Size = size.Size;
