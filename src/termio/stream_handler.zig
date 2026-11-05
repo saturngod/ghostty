@@ -677,6 +677,7 @@ pub const StreamHandler = struct {
 
         // We first always set the raw mode on our mode state.
         self.terminal.modes.set(mode, enabled);
+        if (mode == .grapheme_cluster) self.terminal.flags.myanmar_app_grapheme = enabled;
 
         // And then some modes require additional processing.
         switch (mode) {

@@ -2015,6 +2015,7 @@ pub const Handler = struct {
 
         // Set the mode on the terminal
         self.terminal.modes.set(mode, enabled);
+        if (mode == .grapheme_cluster) self.terminal.flags.myanmar_app_grapheme = enabled;
 
         // Some modes require additional processing
         switch (mode) {

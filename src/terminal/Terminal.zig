@@ -118,6 +118,12 @@ flags: packed struct {
     /// See the `myanmar-prompt-width` config.
     myanmar_prompt_zero_width: bool = false,
 
+    /// Set when the running program turned on grapheme clustering (mode
+    /// 2027) itself, rather than it being on from the config. Such programs
+    /// (agy) count some Myanmar spacing marks as zero width. Cleared at the
+    /// next shell prompt, so it doesn't outlive the program.
+    myanmar_app_grapheme: bool = false,
+
     /// The mouse event mode and format. These are set to the last
     /// set mode in modes. You can't get the right event/format to use
     /// based on modes alone because modes don't show you what order
@@ -646,11 +652,14 @@ fn printSliceOf(self: *Terminal, comptime Cp: type, cps: []const Cp) !void {
 
         // Myanmar marks at the prompt may need a different width than
         // the table gives them, which only print() knows how to apply.
+        // With grapheme clustering, Myanmar marks always need print(),
+        // which gives each mark its own width (see printMyanmarMark).
         if (comptime Cp == u32) {
-            if (self.flags.myanmar_prompt_zero_width) {
+            const grapheme = self.modes.get(.grapheme_cluster);
+            if (grapheme or self.flags.myanmar_prompt_zero_width) {
                 for (cps) |cp| {
                     if (unicode.myanmar.isMark(cp)) {
-                        if (self.cursorIsAtPrompt()) break :fast false;
+                        if (grapheme or self.cursorIsAtPrompt()) break :fast false;
                         break;
                     }
                 }
@@ -1953,6 +1962,24 @@ pub fn print(self: *Terminal, c: u21) !void {
         return try self.printZeroWidthAttach(c);
     }
 
+    // With grapheme clustering, a Myanmar spacing mark would make its
+    // whole syllable two columns wide, however many marks it has. Programs
+    // count each mark instead (ကား is 3 columns, not 2), so give each mark
+    // its own width: zero-width marks join the previous cell and spacing
+    // marks take a cell of their own. The shaper still draws the syllable
+    // as one unit across those cells.
+    if (c > 255 and
+        self.modes.get(.grapheme_cluster) and
+        unicode.myanmar.isMark(c))
+    {
+        @branchHint(.unlikely);
+        const zero = unicode.table.get(c).width == 0 or
+            (self.flags.myanmar_app_grapheme and
+                unicode.myanmar.isZeroWidthInClusterMode(c));
+        if (zero) return try self.printZeroWidthAttach(c);
+        return try self.printCodepoint(c, 1, charset, right_limit);
+    }
+
     // Perform grapheme clustering if grapheme support is enabled (mode 2027).
     // This is MUCH slower than the normal path so the conditional below is
     // purposely ordered in least-likely to most-likely so we can drop out
@@ -2839,6 +2866,9 @@ pub fn semanticPrompt(
         .fresh_line => try self.semanticPromptFreshLine(),
 
         .fresh_line_new_prompt => {
+            // A new prompt means the program that set mode 2027 is gone.
+            self.flags.myanmar_app_grapheme = false;
+
             // "First do a fresh-line."
             try self.semanticPromptFreshLine();
 
@@ -2897,6 +2927,8 @@ pub fn semanticPrompt(
         },
 
         .prompt_start => {
+            self.flags.myanmar_app_grapheme = false;
+
             // Explicit start of prompt. Optional after an A or N command.
             // The k (kind) option specifies the type of prompt:
             // regular primary prompt (k=i or default),
@@ -19658,7 +19690,7 @@ test "Terminal: Myanmar marks are zero width at the prompt" {
 
 test "Terminal: Myanmar marks keep standard widths outside the prompt" {
     // Command output (vim, Claude Code, ...) keeps the standard widths:
-    // မြ (wide) + န် + မ + ာ = 5 columns.
+    // မ + ြ + န် + မ + ာ = 5 columns.
     const r = try testMyanmarWidth(true, false, true);
     try testing.expectEqual(@as(usize, 5), r.x);
     try testing.expect(r.text_ok);
@@ -19668,4 +19700,50 @@ test "Terminal: Myanmar prompt widths can be turned off" {
     const r = try testMyanmarWidth(false, true, true);
     try testing.expectEqual(@as(usize, 5), r.x);
     try testing.expect(r.text_ok);
+}
+
+fn testMyanmarClusterWidth(text: []const u8, app_mode_2027: bool) !usize {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 30, .rows = 3 });
+    defer t.deinit(alloc);
+    t.modes.set(.grapheme_cluster, true);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    if (app_mode_2027) s.nextSlice("\x1b[?2027h");
+    s.nextSlice(text);
+
+    const str = try t.plainString(alloc);
+    defer alloc.free(str);
+    try testing.expectEqualStrings(text, str);
+    return t.screens.active.cursor.x;
+}
+
+test "Terminal: each Myanmar spacing mark adds a column" {
+    // ကား: က + ာ + း, like Codex counts it (not one wide cell).
+    try testing.expectEqual(@as(usize, 3), try testMyanmarClusterWidth("ကား", false));
+    // ကြော: က + ြ + ေ + ာ.
+    try testing.expectEqual(@as(usize, 4), try testMyanmarClusterWidth("ကြော", false));
+}
+
+test "Terminal: programs that set mode 2027 get agy's Myanmar widths" {
+    // ေ ျ ြ are zero width: မ + န် + မ + ာ = 4, ကြော = က + ာ = 2.
+    try testing.expectEqual(@as(usize, 4), try testMyanmarClusterWidth("မြန်မာ", true));
+    try testing.expectEqual(@as(usize, 2), try testMyanmarClusterWidth("ကြော", true));
+    // မြန်မာစာသည်, typed in agy: 8 columns.
+    try testing.expectEqual(@as(usize, 8), try testMyanmarClusterWidth("မြန်မာစာသည်", true));
+}
+
+test "Terminal: a new prompt drops the mode 2027 Myanmar widths" {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 30, .rows = 3 });
+    defer t.deinit(alloc);
+    t.modes.set(.grapheme_cluster, true);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b[?2027h");
+    try testing.expect(t.flags.myanmar_app_grapheme);
+    s.nextSlice("\x1b]133;A\x07");
+    try testing.expect(!t.flags.myanmar_app_grapheme);
 }

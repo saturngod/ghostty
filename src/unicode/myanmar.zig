@@ -32,3 +32,20 @@ pub fn isMark(cp: u32) bool {
         else => false,
     };
 }
+
+/// Returns true for the spacing marks that programs which turn on
+/// grapheme clustering (mode 2027), such as agy, count as zero columns:
+/// ေ ျ ြ ၖ ၗ ႄ. Other programs (Codex, vim) count them as one column like
+/// any other spacing mark.
+pub fn isZeroWidthInClusterMode(cp: u32) bool {
+    return switch (cp) {
+        0x1031, // ေ vowel sign e
+        0x103B, // ျ medial ya
+        0x103C, // ြ medial ra
+        0x1056, // ၖ vowel sign vocalic r
+        0x1057, // ၗ vowel sign vocalic rr
+        0x1084, // ႄ vowel sign shan e
+        => true,
+        else => false,
+    };
+}
