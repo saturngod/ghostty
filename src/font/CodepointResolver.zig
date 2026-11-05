@@ -28,7 +28,19 @@ const RenderOptions = font.Glyph.RenderOptions;
 const SpriteFace = font.SpriteFace;
 const Style = font.Style;
 
+const myanmar = @import("shaper/myanmar.zig");
+
 const log = std.log.scoped(.font_codepoint_resolver);
+
+/// Fonts to try first for Myanmar text, before the system fallback. The
+/// system often picks a font that is hard to read at terminal sizes; these
+/// are the fonts browsers and Myanso use (macOS, then Windows, then Linux).
+const myanmar_families = [_][:0]const u8{
+    "Noto Sans Myanmar",
+    "Myanmar MN",
+    "Myanmar Text",
+    "Padauk",
+};
 
 /// The underlying collection of fonts. This will be modified as
 /// new fonts are found via the resolver. The resolver takes ownership
@@ -172,6 +184,13 @@ pub fn getIndex(
         if (self.discover) |disco| discover: {
             const load_opts = self.collection.load_options orelse
                 break :discover;
+
+            if (myanmar.isMyanmar(cp)) {
+                if (self.getIndexMyanmar(alloc, disco, cp, style, p_mode, load_opts.size.points)) |idx| {
+                    return idx;
+                }
+            }
+
             var disco_it = disco.discoverFallback(alloc, &self.collection, .{
                 .codepoint = cp,
                 .size = load_opts.size.points,
@@ -207,7 +226,14 @@ pub fn getIndex(
                 return self.collection.addDeferred(alloc, deferred_face, .{
                     .style = style,
                     .fallback = true,
-                    .size_adjustment = font.default_fallback_adjustment,
+                    // Myanmar fonts have very tall line metrics to fit
+                    // stacked marks, so matching them to the primary font
+                    // distorts them. Draw them at their own size like a
+                    // browser does.
+                    .size_adjustment = if (myanmar.isMyanmar(cp))
+                        .none
+                    else
+                        font.default_fallback_adjustment,
                 }) catch {
                     deferred_face.deinit();
                     break :discover;
@@ -225,6 +251,58 @@ pub fn getIndex(
 
     // For non-regular fonts, we fall back to regular with any presentation
     return self.collection.getIndex(cp, .regular, .{ .any = {} });
+}
+
+/// Find a font for a Myanmar codepoint from our preferred families. Returns
+/// null if none of them is installed, so the caller can use the system
+/// fallback instead.
+fn getIndexMyanmar(
+    self: *CodepointResolver,
+    alloc: Allocator,
+    disco: *Discover,
+    cp: u32,
+    style: Style,
+    p_mode: Collection.PresentationMode,
+    size: f32,
+) ?Collection.Index {
+    for (myanmar_families) |family| {
+        var disco_it = disco.discover(alloc, .{
+            .family = family,
+            .codepoint = cp,
+            .size = size,
+        }) catch continue;
+        defer disco_it.deinit();
+
+        // Discovery may return close matches from other families (it is
+        // a sorted search on fontconfig), so only take the one we asked for.
+        while (true) {
+            var deferred_face = (disco_it.next() catch break) orelse break;
+            var buf: [256]u8 = undefined;
+            const name = deferred_face.familyName(&buf) catch "";
+            const face: Collection.Entry = .{
+                .face = .{ .deferred = deferred_face },
+                .fallback = true,
+            };
+            if (!std.ascii.eqlIgnoreCase(name, family) or
+                !face.hasCodepoint(cp, p_mode))
+            {
+                deferred_face.deinit();
+                continue;
+            }
+
+            log.info("found codepoint 0x{X} in Myanmar face={s}", .{ cp, name });
+            return self.collection.addDeferred(alloc, deferred_face, .{
+                .style = style,
+                .fallback = true,
+                .size_adjustment = .none,
+            }) catch {
+                deferred_face.deinit();
+                return null;
+            };
+        }
+    }
+
+    return null;
 }
 
 /// Checks if the codepoint is in the map of codepoint overrides,

@@ -19,6 +19,7 @@ const constraintWidth = cellpkg.constraintWidth;
 const isCovering = cellpkg.isCovering;
 const rowNeverExtendBg = @import("row.zig").neverExtendBg;
 const Overlay = @import("Overlay.zig");
+const MyanmarFlow = @import("myanmar_flow.zig").Flow;
 const imagepkg = @import("image.zig");
 const ImageState = imagepkg.State;
 const shadertoy = @import("shadertoy.zig");
@@ -2990,6 +2991,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             var shaper_cells: ?[]const font.shape.Cell = null;
             var shaper_cells_i: usize = 0;
 
+            // Pushes text right after Myanmar words that are wider than
+            // their cells, instead of drawing over them.
+            var myanmar_flow: MyanmarFlow = .init(self.grid_metrics.cell_width);
+
             for (
                 0..,
                 cells_raw[0..cells_len],
@@ -3319,6 +3324,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         };
 
                     const shaped_cells = shaper_cells orelse break :glyphs;
+                    myanmar_flow.enter(run, cells_raw);
 
                     // If there are no shaper cells for this run, ignore it.
                     // This can occur for runs of empty cells, and is fine.
@@ -3337,6 +3343,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         run.offset + shaped_cells[shaper_cells_i].x == x) : ({
                         shaper_cells_i += 1;
                     }) {
+                        myanmar_flow.track(run, shaped_cells[shaper_cells_i]);
                         self.addGlyph(
                             @intCast(x),
                             @intCast(y),
@@ -3346,6 +3353,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             shaper_run.?,
                             fg,
                             alpha,
+                            myanmar_flow.shift,
                         ) catch |err| {
                             log.warn(
                                 "error adding glyph to cell, will be invalid x={} y={}, err={}",
@@ -3484,6 +3492,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             shaper_run: font.shape.TextRun,
             color: terminal.color.RGB,
             alpha: u8,
+            x_shift: i32,
         ) !void {
             const cell = cell_raws[x];
             const cp = cell.codepoint();
@@ -3530,7 +3539,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .glyph_pos = .{ render.glyph.atlas_x, render.glyph.atlas_y },
                 .glyph_size = .{ render.glyph.width, render.glyph.height },
                 .bearings = .{
-                    @intCast(render.glyph.offset_x + shaper_cell.x_offset),
+                    @intCast(render.glyph.offset_x + shaper_cell.x_offset + x_shift),
                     @intCast(render.glyph.offset_y + shaper_cell.y_offset),
                 },
             });

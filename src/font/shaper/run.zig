@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const font = @import("../main.zig");
 const shape = @import("../shape.zig");
 const terminal = @import("../../terminal/main.zig");
+const myanmar = @import("myanmar.zig");
 const autoHash = std.hash.autoHash;
 const Hasher = std.hash.Wyhash;
 
@@ -81,6 +82,9 @@ pub const RunIterator = struct {
         // Let's get our style that we'll expect for the run.
         const style: terminal.Style = if (cells[self.i].hasStyling()) styles[self.i] else .{};
 
+        // Whether this run has Myanmar text in it. See myanmar.zig.
+        var run_myanmar = false;
+
         // Go through cell by cell and accumulate while we build our run.
         var j: usize = self.i;
         while (j < max) : (j += 1) {
@@ -94,7 +98,7 @@ pub const RunIterator = struct {
             // If we have a selection and we're at a boundary point, then
             // we break the run here.
             if (self.opts.selection) |bounds| {
-                if (j > self.i) {
+                if (j > self.i and !joinsMyanmar(cells, j)) {
                     if (bounds[0] > 0 and j == bounds[0]) break;
                     if (bounds[1] > 0 and j == bounds[1] + 1) break;
                 }
@@ -185,7 +189,7 @@ pub const RunIterator = struct {
             // such as a skin-tone emoji is fine, but hovering over the
             // joiners will show the joiners allowing you to modify the
             // emoji.
-            if (!cell.hasGrapheme()) {
+            if (!cell.hasGrapheme() and !joinsMyanmar(cells, j)) {
                 if (self.opts.cursor_x) |cursor_x| {
                     // Exactly: self.i is the cursor and we iterated once. This
                     // means that we started exactly at the cursor and did at
@@ -216,6 +220,17 @@ pub const RunIterator = struct {
                 idx: font.Collection.Index,
                 fallback: ?u32 = null,
             } = font_info: {
+                // Spaces between Myanmar words stay in the Myanmar run if
+                // its font has a space, so the words are laid out together
+                // and a wide word can never overlap the next one.
+                if (run_myanmar and
+                    !cell.hasGrapheme() and
+                    (cell.codepoint() == ' ' or cell.codepoint() == 0) and
+                    self.opts.grid.hasCodepoint(current_font, ' ', presentation))
+                {
+                    break :font_info .{ .idx = current_font };
+                }
+
                 // If we find a font that supports this entire grapheme
                 // then we use that.
                 if (try self.indexForCell(
@@ -266,6 +281,8 @@ pub const RunIterator = struct {
                 try self.addCodepoint(&hasher, ' ', @intCast(cluster));
                 continue;
             }
+
+            if (myanmar.isMyanmar(cell.codepoint())) run_myanmar = true;
 
             // Add all the codepoints for our grapheme
             try self.addCodepoint(
@@ -381,6 +398,16 @@ pub const RunIterator = struct {
         return null;
     }
 };
+
+/// Returns true if the cells on both sides of the boundary before cell j
+/// are Myanmar text. We never break a run there for the cursor or a
+/// selection, because splitting a Myanmar syllable across two runs breaks
+/// its shaping (marks get drawn on dotted circles).
+fn joinsMyanmar(cells: []const terminal.page.Cell, j: usize) bool {
+    if (j == 0 or j >= cells.len) return false;
+    return myanmar.isMyanmar(cells[j - 1].codepoint()) and
+        myanmar.isMyanmar(cells[j].codepoint());
+}
 
 /// Returns a style that when compared must be identical for a run to
 /// continue.

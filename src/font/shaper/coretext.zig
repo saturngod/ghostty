@@ -7,6 +7,7 @@ const font = @import("../main.zig");
 const os = @import("../../os/main.zig");
 const terminal = @import("../../terminal/main.zig");
 const unicode = @import("../../unicode/main.zig");
+const myanmar = @import("myanmar.zig");
 const Feature = font.shape.Feature;
 const FeatureList = font.shape.FeatureList;
 const default_features = font.shape.default_features;
@@ -407,6 +408,11 @@ pub const Shaper = struct {
         // we set this to true, which indicates that we must sort our buffer.
         var non_ltr: bool = false;
 
+        // Myanmar runs are laid out by syllable after shaping, so we keep
+        // the natural glyph positions around for them. See myanmar.zig.
+        const is_myanmar = myanmar.containsMyanmar(state.codepoints.items);
+        var myanmar_glyphs: std.ArrayList(myanmar.Glyph) = .empty;
+
         // CoreText may generate multiple runs even though our input to
         // CoreText is already split into runs by our own run iterator.
         // The runs as far as I can tell are always sequential to each
@@ -511,6 +517,13 @@ pub const Shaper = struct {
                     .glyph_index = glyph,
                 });
 
+                if (is_myanmar) try myanmar_glyphs.append(alloc, .{
+                    .cluster = cluster,
+                    .pen = run_offset.x,
+                    .x = position.x,
+                    .advance = advance.width,
+                });
+
                 // Add our advances to keep track of our run offsets.
                 // Advances apply to the NEXT cell.
                 run_offset.x += advance.width;
@@ -520,6 +533,14 @@ pub const Shaper = struct {
                 //run_offset_y += advance.height;
             }
         }
+
+        if (is_myanmar) try myanmar.layout(
+            alloc,
+            state.codepoints.items,
+            myanmar_glyphs.items,
+            self.cell_buf.items,
+            @floatFromInt(run.grid.metrics.cell_width),
+        );
 
         // If our buffer contains some non-ltr sections we need to sort it :/
         if (non_ltr) {
@@ -1833,6 +1854,97 @@ test "shape Chakma vowel sign with ligature (vowel sign renders first)" {
 
         // The vowel sign U renders before the TAA:
         try testing.expect(cells[1].x_offset < cells[2].x_offset);
+    }
+    try testing.expectEqual(@as(usize, 1), count);
+}
+
+test "shape Myanmar syllable as one unit" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var testdata = testShaperWithDiscoveredFont(
+        alloc,
+        "Noto Sans Myanmar",
+    ) catch return error.SkipZigTest;
+    defer testdata.deinit();
+
+    // ကြောင် ("cat"): ေ and ြ are stored after က but drawn before it.
+    var t = try terminal.Terminal.init(testing.io, alloc, .{ .cols = 30, .rows = 3 });
+    defer t.deinit(alloc);
+    t.modes.set(.grapheme_cluster, true);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("ကြောင်");
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var shaper = &testdata.shaper;
+    var it = shaper.runIterator(.{
+        .grid = testdata.grid,
+        .cells = state.row_data.get(0).cells.slice(),
+    });
+    var count: usize = 0;
+    while (try it.next(alloc)) |run| {
+        count += 1;
+        const cells = try shaper.shape(run);
+        try testing.expect(cells.len > 0);
+
+        // The whole syllable is drawn from its first cell, so its glyphs
+        // keep the positions the font gave them and can't be split apart.
+        for (cells) |cell| try testing.expectEqual(@as(u16, 0), cell.x);
+        try testing.expect(cells[0].x_offset <= cells[cells.len - 1].x_offset);
+    }
+    try testing.expectEqual(@as(usize, 1), count);
+}
+
+test "shape Myanmar word is not split by the cursor" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var testdata = testShaperWithDiscoveredFont(
+        alloc,
+        "Noto Sans Myanmar",
+    ) catch return error.SkipZigTest;
+    defer testdata.deinit();
+
+    // မြန်မာ is two syllables: မြန် and မာ.
+    var t = try terminal.Terminal.init(testing.io, alloc, .{ .cols = 30, .rows = 3 });
+    defer t.deinit(alloc);
+    t.modes.set(.grapheme_cluster, true);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("မြန်မာ");
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    // Put the cursor in the middle of the word.
+    var shaper = &testdata.shaper;
+    var it = shaper.runIterator(.{
+        .grid = testdata.grid,
+        .cells = state.row_data.get(0).cells.slice(),
+        .cursor_x = 2,
+    });
+    var count: usize = 0;
+    while (try it.next(alloc)) |run| {
+        count += 1;
+        const cells = try shaper.shape(run);
+
+        // Glyphs are anchored to the first cell of their syllable only,
+        // and x never goes backwards.
+        var last_x: u16 = 0;
+        var anchors: usize = 0;
+        for (cells) |cell| {
+            try testing.expect(cell.x >= last_x);
+            if (cell.x != last_x) anchors += 1;
+            last_x = cell.x;
+        }
+        try testing.expectEqual(@as(usize, 1), anchors);
     }
     try testing.expectEqual(@as(usize, 1), count);
 }

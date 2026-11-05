@@ -66,4 +66,5 @@ test {
     _ = size;
     _ = Thread;
     _ = State;
+    _ = @import("renderer/myanmar_flow.zig");
 }

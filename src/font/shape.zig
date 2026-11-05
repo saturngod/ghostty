@@ -10,6 +10,7 @@ pub const harfbuzz = @import("shaper/harfbuzz.zig");
 pub const coretext = @import("shaper/coretext.zig");
 pub const web_canvas = @import("shaper/web_canvas.zig");
 pub const Cache = @import("shaper/Cache.zig");
+pub const myanmar = @import("shaper/myanmar.zig");
 pub const TextRun = run.TextRun;
 pub const RunIterator = run.RunIterator;
 pub const Feature = feature.Feature;
@@ -55,7 +56,18 @@ pub const Cell = struct {
     /// valid for a given GroupCache and FontIndex that was used to create
     /// the runs.
     glyph_index: u32,
+
+    /// The horizontal advance of this glyph in pixels. Only set for
+    /// Myanmar runs (see shaper/myanmar.zig), where the renderer uses it
+    /// to find where the text really ends; zero otherwise. It fits in what
+    /// would otherwise be padding, so it doesn't grow this struct.
+    advance: u16 = 0,
 };
+
+comptime {
+    // advance must stay in the padding (see above).
+    if (@sizeOf(Cell) != 12) @compileError("font.shape.Cell grew");
+}
 
 /// Options for shapers.
 pub const Options = struct {
@@ -99,4 +111,5 @@ test {
 
     // Always test noop
     _ = noop;
+    _ = myanmar;
 }
