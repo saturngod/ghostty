@@ -216,6 +216,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         myanmar_backgrounds: std.ArrayList(?terminal.color.RGB) = .empty,
         myanmar_rects: std.ArrayList(shaderpkg.CellText) = .empty,
 
+        /// How many Myanmar background rectangles start each row's text
+        /// list (see addMyanmarHighlights), indexed by viewport row.
+        myanmar_rect_counts: std.ArrayList(usize) = .empty,
+
+        /// The copy of a block cursor drawn on top of a Myanmar row's
+        /// backgrounds (see addMyanmarCursor), so it can be removed again.
+        myanmar_cursor: ?struct {
+            y: usize,
+            index: usize,
+            cell: shaderpkg.CellText,
+        } = null,
+
         /// The images that we may render.
         images: ImageState = .empty,
 
@@ -880,6 +892,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.myanmar_segments.deinit(self.alloc);
             self.myanmar_backgrounds.deinit(self.alloc);
             self.myanmar_rects.deinit(self.alloc);
+            self.myanmar_rect_counts.deinit(self.alloc);
 
             self.config.deinit();
             self.api.deinit();
@@ -2774,6 +2787,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Setup our cursor rendering information.
             cursor: {
                 // Clear our cursor by default.
+                self.removeMyanmarCursor();
                 self.cells.setCursor(null, null);
                 self.uniforms.cursor_pos = .{
                     std.math.maxInt(u16),
@@ -2844,6 +2858,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     style,
                     cursor_color,
                 );
+                if (style == .block) self.addMyanmarCursor(cursor_vp.y) catch |err| {
+                    log.warn("error adding Myanmar cursor err={}", .{err});
+                };
 
                 // If the cursor is visible then we set our uniforms.
                 if (style == .block) {
@@ -3012,6 +3029,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             }
             const myanmar_row = myanmar_segments.len > 0;
+            if (self.myanmar_rect_counts.items.len <= y) {
+                try self.myanmar_rect_counts.appendNTimes(
+                    self.alloc,
+                    0,
+                    @as(usize, y) + 1 - self.myanmar_rect_counts.items.len,
+                );
+            }
+            self.myanmar_rect_counts.items[y] = 0;
             if (myanmar_row) {
                 self.myanmar_backgrounds.clearRetainingCapacity();
                 try self.myanmar_backgrounds.appendNTimes(self.alloc, null, cells_len);
@@ -3526,6 +3551,35 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 0,
                 self.myanmar_rects.items,
             );
+            self.myanmar_rect_counts.items[y] = self.myanmar_rects.items.len;
+        }
+
+        /// A block cursor is drawn before every row (so the text over it
+        /// can take the cursor text color), which puts it underneath the
+        /// backgrounds of a Myanmar row. Draw a copy of it in that row,
+        /// right after the backgrounds and before the text.
+        fn addMyanmarCursor(self: *Self, y: usize) !void {
+            if (y >= self.myanmar_rect_counts.items.len) return;
+            const rects = self.myanmar_rect_counts.items[y];
+            if (rects == 0) return;
+            const cursor = self.cells.getCursorGlyph() orelse return;
+
+            const list = &self.cells.fg_rows[y + 1];
+            const index = @min(rects, list.items.len);
+            try list.insert(self.alloc, index, cursor);
+            self.myanmar_cursor = .{ .y = y, .index = index, .cell = cursor };
+        }
+
+        /// Remove the cursor copy added by addMyanmarCursor, unless its row
+        /// was rebuilt since (which already dropped it).
+        fn removeMyanmarCursor(self: *Self) void {
+            const c = self.myanmar_cursor orelse return;
+            self.myanmar_cursor = null;
+            if (c.y + 1 >= self.cells.fg_rows.len) return;
+            const list = &self.cells.fg_rows[c.y + 1];
+            if (c.index >= list.items.len) return;
+            if (!std.meta.eql(list.items[c.index], c.cell)) return;
+            _ = list.orderedRemove(c.index);
         }
 
         /// Add an underline decoration to the specified cell
