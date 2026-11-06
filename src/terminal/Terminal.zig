@@ -2052,11 +2052,24 @@ fn printOne(self: *Terminal, c: u21) !void {
         return try self.printCodepoint(c, 1, charset, right_limit);
     }
 
+    // For the same reason, a Myanmar letter always starts a cell of its
+    // own. Grapheme clustering would join a stacked consonant to the one
+    // before it (င်္ + ဂ, မ္ + ဘ) and make that cell two columns wide, but
+    // the shell counts the stacked consonant as one more column. Its next
+    // backspace then lands on the second half of the wide cell, and
+    // rewriting it there erases the kinzi. Programs that turn on grapheme
+    // clustering themselves still get the clustering.
+    const myanmar_letter = c > 255 and
+        !self.flags.myanmar_app_grapheme and
+        unicode.myanmar.isMyanmar(c) and
+        !unicode.myanmar.isMark(c);
+
     // Perform grapheme clustering if grapheme support is enabled (mode 2027).
     // This is MUCH slower than the normal path so the conditional below is
     // purposely ordered in least-likely to most-likely so we can drop out
     // as quickly as possible.
     if (c > 255 and
+        !myanmar_letter and
         self.modes.get(.grapheme_cluster) and
         self.screens.active.cursor.x > 0)
     grapheme: {
@@ -20041,6 +20054,18 @@ test "Terminal: typing Myanmar at a zsh prompt on macOS" {
     const broken = try testMyanmarTyping(false, typed);
     defer testing.allocator.free(broken);
     try testing.expect(!std.mem.eql(u8, broken, "> မြန်မာ"));
+}
+
+test "Terminal: typing a kinzi at a zsh prompt on macOS" {
+    // What zsh on macOS sends while you type ဝင့်သိင်္ဂီအောင် key by key. It
+    // counts the stacked ဂ after the kinzi (င်္) as a column of its own,
+    // so the kinzi must stay in its own cell or the next backspace
+    // rewrites it away.
+    const typed = "ဝင\x08င့\x08င့်သ\x08သိင\x08င်\x08င်္ဂ\x08ဂီအ\x08အေ\x08အောင\x08င်";
+
+    const out = try testMyanmarTyping(true, typed);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("> ဝင့်သိင်္ဂီအောင်", out);
 }
 
 test "Terminal: deleting Myanmar at a zsh prompt on macOS" {
