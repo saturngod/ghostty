@@ -17,11 +17,16 @@
 //!     spacing, like in any text view. The terminal often gives stacked
 //!     forms (္ဘ, kinzi) more cells than they draw, and snapping each
 //!     syllable to the grid would open gaps in the middle of a word.
-//!   - Each word (and any non-Myanmar text such as a space) starts at the
-//!     grid column of its first cell, unless the previous text is still
-//!     being drawn there, in which case it starts right after it. Text
-//!     never overlaps and is never squeezed; any slack ends up after the
-//!     word, where it reads as space.
+//!   - Words and the spaces between them also follow each other at their
+//!     natural spacing. The terminal usually gives Myanmar text more cells
+//!     than it draws (each spacing mark has a cell of its own), and
+//!     snapping the next word back to its grid column would show the
+//!     slack as a space that isn't in the text.
+//!   - Only text after a column gap (two or more spaces, as in `ls`
+//!     output or a table) starts at the grid column of its first cell,
+//!     unless the previous text is still being drawn there, in which case
+//!     it starts right after it. Text never overlaps and is never
+//!     squeezed.
 //!
 //! Cells are only used to decide where a word may start. They never cut a
 //! syllable apart.
@@ -149,21 +154,21 @@ pub fn layout(
     {
         var current: u32 = 0;
         var prev_cluster: ?u32 = null;
-        var prev_cp: ?u32 = null;
+
+        // Spaces right before the current codepoint. Only text after a
+        // column gap (two or more spaces) goes back to the grid.
+        var spaces_before: usize = 0;
         for (codepoints, 0..) |c, i| {
             if (c.codepoint == 0) continue;
             if (prev_cluster == null or c.cluster != prev_cluster.?) {
                 if (prev_cluster == null or startsSyllable(codepoints, i)) {
                     current = c.cluster;
-                    snaps[current] = if (prev_cp) |p|
-                        !(isMyanmar(p) and isMyanmar(c.codepoint))
-                    else
-                        true;
+                    snaps[current] = prev_cluster == null or spaces_before >= 2;
                 }
                 prev_cluster = c.cluster;
             }
             starts[c.cluster] = current;
-            prev_cp = c.codepoint;
+            spaces_before = if (c.codepoint == ' ') spaces_before + 1 else 0;
         }
     }
 
@@ -378,13 +383,13 @@ test "myanmar: spaces are at least one cell wide" {
     try testing.expectEqual(@as(i16, 6), cells[3].x_offset);
 }
 
-test "myanmar: layout snaps words to the grid when there is room" {
+test "myanmar: layout flows words after a single space" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
     // မြန် (cells 0-3), a space (cell 4), မာ (cells 5-6), 10px cells.
-    // The word and the space are narrower than their cells, so each of
-    // them starts at its own grid column.
+    // The word is narrower than its cells (20px). The space and the next
+    // word follow right after it instead of leaving a gap.
     const cps = testCodepoints("မြန် မာ");
     const glyphs = [_]Glyph{
         .{ .cluster = 1, .pen = 0, .x = 0, .advance = 4 },
@@ -398,12 +403,45 @@ test "myanmar: layout snaps words to the grid when there is room" {
     var cells: [glyphs.len]font.shape.Cell = @splat(.{ .x = 0, .glyph_index = 0 });
     try layout(alloc, &cps, &glyphs, &cells, 10);
 
+    // The space starts at 20px (cell 4 is at 40px) and is a full cell
+    // wide, so မာ starts at 30px (cell 5 is at 50px).
     try testing.expectEqual(@as(u16, 4), cells[4].x);
-    try testing.expectEqual(@as(i16, 0), cells[4].x_offset);
+    try testing.expectEqual(@as(i16, -20), cells[4].x_offset);
     try testing.expectEqual(@as(u16, 5), cells[5].x);
-    try testing.expectEqual(@as(i16, 0), cells[5].x_offset);
+    try testing.expectEqual(@as(i16, -20), cells[5].x_offset);
     try testing.expectEqual(@as(u16, 5), cells[6].x);
-    try testing.expectEqual(@as(i16, 8), cells[6].x_offset);
+    try testing.expectEqual(@as(i16, -12), cells[6].x_offset);
+}
+
+test "myanmar: layout snaps words to the grid after a column gap" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // မြန် (cells 0-3), two spaces (cells 4-5), မာ (cells 6-7), 10px
+    // cells. After two spaces, မာ starts at its own grid column (60px).
+    const cps = testCodepoints("မြန်  မာ");
+    const glyphs = [_]Glyph{
+        .{ .cluster = 1, .pen = 0, .x = 0, .advance = 4 },
+        .{ .cluster = 0, .pen = 4, .x = 4, .advance = 8 },
+        .{ .cluster = 2, .pen = 12, .x = 12, .advance = 8 },
+        .{ .cluster = 3, .pen = 20, .x = 16, .advance = 0 },
+        .{ .cluster = 4, .pen = 20, .x = 20, .advance = 5 },
+        .{ .cluster = 5, .pen = 25, .x = 25, .advance = 5 },
+        .{ .cluster = 6, .pen = 30, .x = 30, .advance = 8 },
+        .{ .cluster = 7, .pen = 38, .x = 38, .advance = 5 },
+    };
+    var cells: [glyphs.len]font.shape.Cell = @splat(.{ .x = 0, .glyph_index = 0 });
+    try layout(alloc, &cps, &glyphs, &cells, 10);
+
+    // The spaces still follow the word (20px and 30px)...
+    try testing.expectEqual(@as(i16, -20), cells[4].x_offset);
+    try testing.expectEqual(@as(i16, -20), cells[5].x_offset);
+
+    // ...but the word after them is back on the grid.
+    try testing.expectEqual(@as(u16, 6), cells[6].x);
+    try testing.expectEqual(@as(i16, 0), cells[6].x_offset);
+    try testing.expectEqual(@as(u16, 6), cells[7].x);
+    try testing.expectEqual(@as(i16, 8), cells[7].x_offset);
 }
 
 test "myanmar: layout flows syllables that are wider than their cells" {

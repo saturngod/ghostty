@@ -1,12 +1,15 @@
 //! Per-row horizontal flow for Myanmar text.
 //!
 //! The shaper lays a Myanmar run out at its natural width (see
-//! font/shaper/myanmar.zig). That width can be larger than the cells the
-//! terminal gave the run, so text after it on the same row would be drawn
-//! on top of it. Like a browser, we instead push the following runs right
-//! until they clear the Myanmar text. As soon as the text fits its cells
-//! again the shift drops back to zero, so the rest of the row stays on the
-//! grid.
+//! font/shaper/myanmar.zig), which rarely matches the cells the terminal
+//! gave the run. Like a browser, the text after it follows right after
+//! it: it is pushed right when the Myanmar text is wider than its cells,
+//! so nothing is drawn on top of it, and pulled left when it is narrower,
+//! so the slack doesn't show up as a space that isn't in the text.
+//!
+//! After a column gap (two or more blank cells, as in `ls` output or a
+//! table), text goes back to its grid column, or as close to it as the
+//! Myanmar text allows, so columns still line up.
 //!
 //! Because text no longer sits exactly on its cells in these rows, the
 //! renderer also records where each piece of the row is drawn (see
@@ -34,6 +37,10 @@ pub const Flow = struct {
     /// Pixels to add to every glyph of the current run.
     shift: i32 = 0,
 
+    /// When `shift` pulls the run left: the cell (absolute) from which
+    /// the run is back on the grid because of a column gap in it.
+    grid_from: ?u16 = null,
+
     /// Furthest pen position (after advance) of the current Myanmar run.
     pen_end: i32 = 0,
 
@@ -48,6 +55,7 @@ pub const Flow = struct {
         run: font.shape.TextRun,
         cells: []const terminal.page.Cell,
     ) void {
+        const first = self.run_offset == null;
         if (self.run_offset) |offset| {
             if (offset == run.offset) return;
             self.finish();
@@ -63,8 +71,47 @@ pub const Flow = struct {
             }
             break :myanmar false;
         };
-        self.shift = @max(0, self.end - self.gridX(run.offset));
-        self.pen_end = self.gridX(run.offset) + self.shift;
+        self.shift = self.end - self.gridX(run.offset);
+        self.grid_from = null;
+        if (first) self.shift = @max(0, self.shift);
+        if (self.shift < 0) self.grid_from = columnGap(cells, run);
+        self.pen_end = self.gridX(run.offset) + self.shiftAt(run.offset);
+    }
+
+    /// Pixels to add to the glyphs of cell x of the current run.
+    pub fn shiftAt(self: *const Flow, x: u32) i32 {
+        if (self.grid_from) |g| if (x >= g) return 0;
+        return self.shift;
+    }
+
+    /// The first cell of `run` after a column gap: two or more blank
+    /// cells in a row, counting the blank cells just before the run.
+    fn columnGap(cells: []const terminal.page.Cell, run: font.shape.TextRun) ?u16 {
+        var blanks: usize = 0;
+        var i: usize = run.offset;
+        while (i > 0 and blanks < 2) {
+            i -= 1;
+            if (!isBlank(cells[i])) break;
+            blanks += 1;
+        }
+        if (blanks >= 2) return run.offset;
+
+        const end: usize = @min(cells.len, @as(usize, run.offset) + run.cells);
+        var x: usize = run.offset;
+        while (x < end) : (x += 1) {
+            if (!isBlank(cells[x])) {
+                blanks = 0;
+                continue;
+            }
+            blanks += 1;
+            if (blanks >= 2) return @intCast(x);
+        }
+        return null;
+    }
+
+    fn isBlank(cell: terminal.page.Cell) bool {
+        if (!cell.hasText()) return true;
+        return cell.codepoint() == ' ' and !cell.hasGrapheme();
     }
 
     /// Append the segments of the current run (after `enter` and `track`
@@ -78,11 +125,23 @@ pub const Flow = struct {
     ) Allocator.Error!void {
         const run_end: u16 = run.offset + run.cells;
         if (!self.run_myanmar or shaped.len == 0) {
-            try out.append(alloc, .{
+            // Split where a column gap puts the run back on the grid.
+            const split: u16 = if (self.grid_from) |g|
+                @max(run.offset, @min(g, run_end))
+            else
+                run_end;
+            if (split > run.offset) try out.append(alloc, .{
                 .grid_start = run.offset,
-                .grid_end = run_end,
+                .grid_end = split,
                 .px_start = self.gridX(run.offset) + self.shift,
-                .px_end = self.gridX(run_end) + self.shift,
+                .px_end = self.gridX(split) + self.shift,
+                .snap = false,
+            });
+            if (split < run_end) try out.append(alloc, .{
+                .grid_start = split,
+                .grid_end = run_end,
+                .px_start = self.gridX(split),
+                .px_end = self.gridX(run_end),
                 .snap = false,
             });
             return;
@@ -94,7 +153,8 @@ pub const Flow = struct {
         var i: usize = 0;
         while (i < shaped.len) {
             const anchor = shaped[i].x;
-            const grid_x = self.gridX(run.offset + anchor) + self.shift;
+            const grid_x = self.gridX(run.offset + anchor) +
+                self.shiftAt(run.offset + anchor);
             var px_start: i32 = std.math.maxInt(i32);
             var px_end: i32 = std.math.minInt(i32);
             while (i < shaped.len and shaped[i].x == anchor) : (i += 1) {
@@ -120,16 +180,17 @@ pub const Flow = struct {
         const pen = self.gridX(run.offset + cell.x) +
             cell.x_offset +
             @as(i32, cell.advance) +
-            self.shift;
+            self.shiftAt(run.offset + cell.x);
         self.pen_end = @max(self.pen_end, pen);
     }
 
     fn finish(self: *Flow) void {
         const offset = self.run_offset orelse return;
+        const run_end = offset + self.run_cells;
         self.end = if (self.run_myanmar)
             self.pen_end
         else
-            self.gridX(offset + self.run_cells) + self.shift;
+            self.gridX(run_end) + self.shiftAt(run_end -| 1);
     }
 
     fn gridX(self: *const Flow, x: u32) i32 {
@@ -329,6 +390,7 @@ fn cellEdge(
     cell_width: i32,
 ) i32 {
     var shift: i32 = 0;
+    var prev_end: u16 = 0;
     for (segments) |seg| {
         if (x < seg.grid_start) break;
         if (x < seg.grid_end) {
@@ -343,11 +405,15 @@ fn cellEdge(
             };
         }
         shift = seg.px_end - @as(i32, seg.grid_end) * cell_width;
+        prev_end = seg.grid_end;
     }
 
     // Not in any segment (e.g. an empty cell): on the grid, plus the shift
-    // of the text before it.
-    const cell_x = @as(i32, x) * cell_width + @max(0, shift);
+    // of the text before it. Text pulled left only pulls the cell right
+    // after it (where the cursor sits after typing); further on is a
+    // column gap, which is back on the grid.
+    if (shift < 0 and x != prev_end) shift = 0;
+    const cell_x = @as(i32, x) * cell_width + shift;
     return switch (edge) {
         .start => cell_x,
         .end => cell_x + cell_width,
@@ -456,11 +522,13 @@ test "myanmar flow: text after an overflowing Myanmar run moves right" {
     try testing.expectEqual(@as(i32, 6), flow.shift);
 }
 
-test "myanmar flow: the row returns to the grid when Myanmar text fits" {
+test "myanmar flow: text after a narrower Myanmar run follows it" {
     const testing = std.testing;
 
+    // မြန်မာစာ" : the Myanmar text has more cells than it draws, and the
+    // quote right after it must not be drawn after a gap.
     var cells: [6]terminal.page.Cell = @splat(.init(0x1000));
-    cells[4] = .init('a');
+    cells[4] = .init('"');
     cells[5] = .init('b');
 
     var flow: Flow = .init(10);
@@ -472,7 +540,71 @@ test "myanmar flow: the row returns to the grid when Myanmar text fits" {
 
     const ab = testRun(4, 2);
     flow.enter(ab, &cells);
-    try testing.expectEqual(@as(i32, 0), flow.shift);
+    try testing.expectEqual(@as(i32, -7), flow.shiftAt(4));
+    try testing.expectEqual(@as(i32, -7), flow.shiftAt(5));
+}
+
+test "myanmar flow: a column gap puts text back on the grid" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Myanmar (cells 0-3), "a  b" (cells 4-7) in one run, 10px cells.
+    var cells: [8]terminal.page.Cell = @splat(.init(0x1000));
+    cells[4] = .init('a');
+    cells[5] = .init(' ');
+    cells[6] = .init(' ');
+    cells[7] = .init('b');
+
+    var flow: Flow = .init(10);
+    const mm = testRun(0, 4);
+    flow.enter(mm, &cells);
+    flow.track(mm, .{ .x = 0, .x_offset = 0, .advance = 25, .glyph_index = 0 });
+
+    // "a" follows the Myanmar text; from the second space on, the run is
+    // back on the grid, so "b" lines up with the rows above and below.
+    const rest = testRun(4, 4);
+    flow.enter(rest, &cells);
+    try testing.expectEqual(@as(i32, -15), flow.shiftAt(4));
+    try testing.expectEqual(@as(i32, -15), flow.shiftAt(5));
+    try testing.expectEqual(@as(i32, 0), flow.shiftAt(6));
+    try testing.expectEqual(@as(i32, 0), flow.shiftAt(7));
+
+    var segs: std.ArrayList(Segment) = .empty;
+    defer segs.deinit(alloc);
+    try flow.appendSegments(alloc, &segs, rest, &.{
+        .{ .x = 0, .glyph_index = 0 },
+        .{ .x = 3, .glyph_index = 0 },
+    });
+    try testing.expectEqual(@as(usize, 2), segs.items.len);
+    try testing.expectEqual(Segment{ .grid_start = 4, .grid_end = 6, .px_start = 25, .px_end = 45, .snap = false }, segs.items[0]);
+    try testing.expectEqual(Segment{ .grid_start = 6, .grid_end = 8, .px_start = 60, .px_end = 80, .snap = false }, segs.items[1]);
+
+    // A run that starts after a column gap is on the grid.
+    var cells2: [7]terminal.page.Cell = @splat(.init(0x1000));
+    cells2[4] = .init(' ');
+    cells2[5] = .init(' ');
+    cells2[6] = .init('b');
+    var flow2: Flow = .init(10);
+    flow2.enter(mm, &cells2);
+    flow2.track(mm, .{ .x = 0, .x_offset = 0, .advance = 25, .glyph_index = 0 });
+    flow2.enter(testRun(6, 1), &cells2);
+    try testing.expectEqual(@as(i32, 0), flow2.shiftAt(6));
+}
+
+test "myanmar flow: the cursor right after pulled-left text follows it" {
+    const testing = std.testing;
+    const segs = [_]Segment{
+        // Myanmar text on cells 0-3 drawn 25px wide, then a quote pulled
+        // left by 15px.
+        .{ .grid_start = 0, .grid_end = 4, .px_start = 0, .px_end = 25, .snap = true },
+        .{ .grid_start = 4, .grid_end = 5, .px_start = 25, .px_end = 35, .snap = false },
+    };
+
+    // The cell right after the quote is pulled left with it...
+    try testing.expectEqual([2]i32{ 35, 45 }, cellsToPx(&segs, 5, 5, 10));
+
+    // ...but a cell after a gap is back on the grid.
+    try testing.expectEqual([2]i32{ 70, 80 }, cellsToPx(&segs, 7, 7, 10));
 }
 
 test "myanmar flow: a shift carries across following non-Myanmar runs" {

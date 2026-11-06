@@ -3481,8 +3481,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         const pen: i32 = @as(i32, @intCast(x)) *
                             @as(i32, @intCast(self.grid_metrics.cell_width)) +
                             shaped_cells[shaper_cells_i].x_offset +
-                            row_flow.shift;
-                        const x_shift = row_flow.shift + row_fit.apply(pen) - pen;
+                            row_flow.shiftAt(@intCast(x));
+                        const x_shift = row_flow.shiftAt(@intCast(x)) +
+                            row_fit.apply(pen) - pen;
 
                         self.addGlyph(
                             @intCast(x),
