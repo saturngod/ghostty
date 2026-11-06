@@ -656,6 +656,11 @@ fn printSliceOf(self: *Terminal, comptime Cp: type, cps: []const Cp) !void {
         const screen: *Screen = self.screens.active;
         if (screen.charset.single_shift != null) break :fast false;
 
+        // With `myanmar-prompt-width = wrap`, everything printed at the
+        // prompt may replace or extend a Myanmar syllable, which only
+        // print() knows how to do (see printMyanmarSyllable).
+        if (self.myanmarSyllableMoves()) break :fast false;
+
         // Myanmar marks at the prompt may need a different width than
         // the table gives them, which only print() knows how to apply.
         // With grapheme clustering, Myanmar marks always need print(),
@@ -1931,6 +1936,67 @@ pub fn print(self: *Terminal, c: u21) !void {
         @branchHint(.cold);
         return;
     }
+
+    if (self.myanmarSyllableMoves()) {
+        @branchHint(.unlikely);
+        return try self.printMyanmarSyllable(c);
+    }
+
+    return try self.printOne(c);
+}
+
+/// print() at a shell prompt with `myanmar-prompt-width = wrap`.
+///
+/// The shell counts a letter and the Myanmar marks after it as one column,
+/// while each spacing mark (ြ ေ ာ ...) has a cell of its own here. Keep each
+/// shell column as one syllable of cells:
+///
+///   - Text printed over a syllable replaces the whole syllable, so the
+///     cells of its old marks are removed. Otherwise zsh erasing မာ with
+///     "\b \b" would leave ာ on the screen.
+///   - A spacing mark takes no room for the shell, so it is inserted
+///     rather than written over the next syllable.
+fn printMyanmarSyllable(self: *Terminal, c: u21) !void {
+    const screen: *Screen = self.screens.active;
+
+    if (c > 255 and unicode.myanmar.isMark(c)) {
+        // Zero-width marks join the previous cell, as print() does.
+        const takes_cell = unicode.table.get(c).width != 0 and
+            !self.flags.myanmar_prompt_zero_width;
+        if (takes_cell and
+            !screen.cursor.pending_wrap and
+            screen.cursor.page_cell.hasText())
+        {
+            self.insertBlanks(1);
+        }
+        return try self.printOne(c);
+    }
+
+    // Only a letter (not a mark) starts a syllable whose marks follow it.
+    const replaces = screen.cursor.page_cell.hasText() and
+        !unicode.myanmar.isMark(screen.cursor.page_cell.codepoint());
+    const y = screen.cursor.y;
+    const x = screen.cursor.x;
+    try self.printOne(c);
+    if (!replaces) return;
+
+    // The cursor must be right after the one cell we just printed, on the
+    // same row. Anything else (wide text, a wrap) is left alone.
+    if (screen.cursor.pending_wrap or
+        screen.cursor.y != y or
+        screen.cursor.x != x + 1) return;
+
+    var marks: usize = 0;
+    const row = screen.cursor.page_pin.cells(.right);
+    for (row) |cell| {
+        if (!cell.hasText() or !unicode.myanmar.isMark(cell.codepoint())) break;
+        marks += 1;
+    }
+    self.deleteChars(marks);
+}
+
+/// The body of print(), which writes c into the screen.
+fn printOne(self: *Terminal, c: u21) !void {
 
     // After doing any printing, wrapping, scrolling, etc. we want to ensure
     // that our screen remains in a consistent state.
@@ -19975,6 +20041,97 @@ test "Terminal: typing Myanmar at a zsh prompt on macOS" {
     const broken = try testMyanmarTyping(false, typed);
     defer testing.allocator.free(broken);
     try testing.expect(!std.mem.eql(u8, broken, "> မြန်မာ"));
+}
+
+test "Terminal: deleting Myanmar at a zsh prompt on macOS" {
+    // Typing မြန်မာ then pressing backspace three times, as zsh sends it.
+    // It erases a syllable with "\b \b" and reprints the ones it keeps.
+    const typed = "မ\x08မြ\x08မြန\x08\x08မြန်မ\x08မာ";
+
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 30, .rows = 3 });
+    defer t.deinit(alloc);
+    t.modes.set(.grapheme_cluster, true);
+    t.flags.myanmar_prompt_syllable_moves = true;
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b]133;A\x07> \x1b]133;B\x07");
+
+    // One backspace at a time, checking nothing is left behind.
+    s.nextSlice(typed ++ "\x08 \x08");
+    {
+        const str = try t.plainString(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings("> မြန်", std.mem.trimEnd(u8, str, " "));
+    }
+    s.nextSlice("\x08\x08မြ \x08");
+    {
+        const str = try t.plainString(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings("> မြ", std.mem.trimEnd(u8, str, " "));
+    }
+    s.nextSlice("\x08 \x08");
+    {
+        const str = try t.plainString(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings(">", std.mem.trimEnd(u8, str, " "));
+    }
+    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.x);
+}
+
+test "Terminal: Ctrl+A then Ctrl+K clears Myanmar at a zsh prompt" {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 30, .rows = 3 });
+    defer t.deinit(alloc);
+    t.modes.set(.grapheme_cluster, true);
+    t.flags.myanmar_prompt_syllable_moves = true;
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b]133;A\x07> \x1b]133;B\x07");
+    s.nextSlice("မ\x08မြ\x08မြန\x08\x08မြန်မ\x08မာ");
+
+    // What zsh sends: Ctrl+A moves back three columns, and Ctrl+K writes
+    // a space over each of them and moves back.
+    s.nextSlice("\x08\x08\x08");
+    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.x);
+    s.nextSlice("   \x08\x08\x08");
+
+    const str = try t.plainString(alloc);
+    defer alloc.free(str);
+    try testing.expectEqualStrings(">", std.mem.trimEnd(u8, str, " "));
+    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.x);
+}
+
+test "Terminal: rewriting a Myanmar syllable mid-line at the prompt" {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 30, .rows = 3 });
+    defer t.deinit(alloc);
+    t.modes.set(.grapheme_cluster, true);
+    t.flags.myanmar_prompt_syllable_moves = true;
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b]133;A\x07\x1b]133;B\x07ကြောက");
+
+    // zsh replaces the first syllable (one column for it) with a plain
+    // letter and leaves the rest alone: the old marks must go.
+    s.nextSlice("\rx");
+    {
+        const str = try t.plainString(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings("xက", str);
+    }
+
+    // Adding a mark doesn't move the shell's columns, so it must not
+    // write over the next syllable.
+    s.nextSlice("\rကာ");
+    {
+        const str = try t.plainString(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings("ကာက", str);
+    }
 }
 
 test "Terminal: arrow keys move over Myanmar syllables at the prompt" {
