@@ -34,20 +34,67 @@
 #endif
 
 /**
+ * Mark a function or type as deprecated.
+ *
+ * A deprecated declaration still works, but it will be removed in a future
+ * major release. Code that uses it gets a compiler warning that includes
+ * @p msg, so the message should say what to use instead.
+ *
+ * Put the macro before GHOSTTY_API on the declaration:
+ *
+ * @code
+ * GHOSTTY_DEPRECATED("use ghostty_foo_new() instead")
+ * GHOSTTY_API GhosttyResult ghostty_foo_create(GhosttyFoo* out);
+ * @endcode
+ *
+ * A program that calls ghostty_foo_create() then gets a warning like this
+ * one from GCC or Clang:
+ *
+ * @code{.unparsed}
+ * warning: 'ghostty_foo_create' is deprecated: use ghostty_foo_new() instead
+ * @endcode
+ *
+ * The macro uses `__attribute__((deprecated))` on GCC and Clang and
+ * `__declspec(deprecated)` on MSVC. On other compilers it does nothing.
+ *
+ * To turn the warnings off while you migrate, pass
+ * `-Wno-deprecated-declarations` to GCC or Clang. You can also define
+ * GHOSTTY_DEPRECATED yourself before including any libghostty-vt header,
+ * and the header keeps your definition:
+ *
+ * @code
+ * #define GHOSTTY_DEPRECATED(msg)
+ * #include <ghostty/vt.h>
+ * @endcode
+ */
+#ifndef GHOSTTY_DEPRECATED
+#if defined(__GNUC__) || defined(__clang__)
+  #define GHOSTTY_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#elif defined(_MSC_VER)
+  #define GHOSTTY_DEPRECATED(msg) __declspec(deprecated(msg))
+#else
+  #define GHOSTTY_DEPRECATED(msg)
+#endif
+#endif
+
+/**
  * Enum int-sizing helpers.
  *
  * The Zig side backs all C enums with c_int, so the C declarations
  * must use int as their underlying type to maintain ABI compatibility.
  *
- * C++11 and C23 support explicit enum underlying types with
- * `enum : int { ... }`. Clang and GCC 13+ also support this syntax as
- * an extension in older C language modes, so use it when available.
+ * In C++11 and later and in C23, GHOSTTY_ENUM_TYPED expands to `: int`,
+ * which sets the enum's type to int directly.
  *
- * Other pre-C23 C compilers are free to choose any type that can
- * represent all values (C11 §6.7.2.2). For those compilers, we add an
- * INT_MAX sentinel as the last entry so the compatible type must be
- * able to represent INT_MAX. The exact compatible type and its
- * signedness remain implementation-defined in this fallback.
+ * C before C23 has no way to set an enum's type. Clang and GCC 13+ accept
+ * `: int` there as an extension, but `-Wpedantic` warns about it, so the
+ * macro expands to nothing in these modes. This keeps the headers free of
+ * warnings under `-std=c11 -Wpedantic`.
+ *
+ * Without `: int`, the C compiler picks a type that can hold every value
+ * of the enum (C11 §6.7.2.2). To make sure that type is as large as int,
+ * every enum ends with a sentinel set to INT_MAX. The compiler still
+ * chooses the exact type, and whether it is signed.
  *
  * INT_MAX is used rather than a fixed constant like 0xFFFFFFFF
  * because enum constants must have type int in pre-C23 C. Values above
@@ -69,14 +116,6 @@
 #define GHOSTTY_ENUM_TYPED : int
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
 #define GHOSTTY_ENUM_TYPED : int
-#elif defined(__clang__)
-  #if __has_extension(c_fixed_enum)
-    #define GHOSTTY_ENUM_TYPED : int
-  #else
-    #define GHOSTTY_ENUM_TYPED
-  #endif
-#elif defined(__GNUC__) && __GNUC__ >= 13
-#define GHOSTTY_ENUM_TYPED : int
 #else
 #define GHOSTTY_ENUM_TYPED
 #endif
@@ -91,7 +130,9 @@
  * Functions that read or write values by key, such as
  * ghostty_terminal_get(), return GHOSTTY_UNSUPPORTED for a key that this
  * version of the library does not know. See @ref keys_sec for how to use
- * that to support older versions of the library.
+ * that to support older versions of the library. Functions of an
+ * optional feature that this build leaves out return it too. See
+ * @ref features_sec.
  */
 typedef enum GHOSTTY_ENUM_TYPED {
     /** Operation completed successfully */
@@ -122,13 +163,18 @@ typedef enum GHOSTTY_ENUM_TYPED {
      */
     GHOSTTY_REJECTED = -7,
     /**
-     * The key is not known to this version of the library.
+     * This library cannot do what was asked.
      *
      * Returned by the functions that read or write values by key when the
      * key is newer than the library. Nothing is read or written. This
      * usually means the program was built with a newer header than the
      * library it is running with. Check for it to fall back gracefully, as
      * shown in @ref keys_compat_sec.
+     *
+     * Also returned by every function of an optional feature that this
+     * build leaves out. For example, ghostty_snapshot_encode() returns it
+     * when the library was built without the `%snapshot` feature. See
+     * @ref features_sec.
      */
     GHOSTTY_UNSUPPORTED = -8,
     GHOSTTY_RESULT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
@@ -280,15 +326,97 @@ typedef struct GhosttyOscCommandImpl* GhosttyOscCommand;
  */
 typedef enum GHOSTTY_ENUM_TYPED {
   /** Plain text (no escape sequences). */
-  GHOSTTY_FORMATTER_FORMAT_PLAIN,
+  GHOSTTY_FORMATTER_FORMAT_PLAIN = 0,
 
   /** VT sequences preserving colors, styles, URLs, etc. */
-  GHOSTTY_FORMATTER_FORMAT_VT,
+  GHOSTTY_FORMATTER_FORMAT_VT = 1,
 
   /** HTML with inline styles. */
-  GHOSTTY_FORMATTER_FORMAT_HTML,
+  GHOSTTY_FORMATTER_FORMAT_HTML = 2,
   GHOSTTY_FORMATTER_FORMAT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyFormatterFormat;
+
+/**
+ * The shape of the cursor.
+ *
+ * Programs change the cursor's shape with the DECSCUSR escape sequence
+ * (CSI Ps SP q). Set the shape that DECSCUSR 0 restores with
+ * GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE. Read the shape to draw with
+ * GHOSTTY_RENDER_STATE_DATA_CURSOR_VISUAL_STYLE.
+ *
+ * @ingroup terminal
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /** Bar cursor (DECSCUSR 5, 6). */
+  GHOSTTY_CURSOR_STYLE_BAR = 0,
+
+  /** Block cursor (DECSCUSR 1, 2). */
+  GHOSTTY_CURSOR_STYLE_BLOCK = 1,
+
+  /** Underline cursor (DECSCUSR 3, 4). */
+  GHOSTTY_CURSOR_STYLE_UNDERLINE = 2,
+
+  /** Hollow block cursor. */
+  GHOSTTY_CURSOR_STYLE_BLOCK_HOLLOW = 3,
+  GHOSTTY_CURSOR_STYLE_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyCursorStyle;
+
+/**
+ * Where an image is drawn relative to the terminal's text.
+ *
+ * Draw each frame from the bottom up, in this order:
+ *
+ * 1. Images in GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND.
+ * 2. Cell background colors.
+ * 3. Images in GHOSTTY_IMAGE_LAYER_BELOW_TEXT.
+ * 4. Text.
+ * 5. Images in GHOSTTY_IMAGE_LAYER_ABOVE_TEXT.
+ *
+ * Within a layer, draw images in order of their z-index, lowest first.
+ *
+ * A Kitty graphics placement's layer comes from its z-index. Each value
+ * below lists its z-index range. For example, a placement with z-index -1
+ * is in GHOSTTY_IMAGE_LAYER_BELOW_TEXT.
+ *
+ * The render state reports each image's layer with
+ * GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER. To visit only some layers with
+ * the Kitty graphics placement iterator, build a mask from the
+ * GHOSTTY_IMAGE_LAYER_MASK_* macros and set it with
+ * GHOSTTY_KITTY_GRAPHICS_PLACEMENT_ITERATOR_OPT_LAYER.
+ *
+ * @ingroup render
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /** Below the cell background colors. Kitty z-index below INT32_MIN / 2
+   *  (-1,073,741,824). */
+  GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND = 0,
+
+  /** Above the cell background colors and below the text. Kitty z-index
+   *  from INT32_MIN / 2 up to -1. */
+  GHOSTTY_IMAGE_LAYER_BELOW_TEXT = 1,
+
+  /** Above the text. Kitty z-index 0 and above. */
+  GHOSTTY_IMAGE_LAYER_ABOVE_TEXT = 2,
+  GHOSTTY_IMAGE_LAYER_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyImageLayer;
+
+/**
+ * Mask bit for GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND.
+ *
+ * The GHOSTTY_IMAGE_LAYER_MASK_* macros select layers in a filter such
+ * as GHOSTTY_KITTY_GRAPHICS_PLACEMENT_ITERATOR_OPT_LAYER. Combine them
+ * with `|`.
+ */
+#define GHOSTTY_IMAGE_LAYER_MASK_BELOW_BACKGROUND \
+  (1u << GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND)
+
+/** Mask bit for GHOSTTY_IMAGE_LAYER_BELOW_TEXT. */
+#define GHOSTTY_IMAGE_LAYER_MASK_BELOW_TEXT \
+  (1u << GHOSTTY_IMAGE_LAYER_BELOW_TEXT)
+
+/** Mask bit for GHOSTTY_IMAGE_LAYER_ABOVE_TEXT. */
+#define GHOSTTY_IMAGE_LAYER_MASK_ABOVE_TEXT \
+  (1u << GHOSTTY_IMAGE_LAYER_ABOVE_TEXT)
 
 /**
  * A borrowed byte string (pointer + length).
@@ -356,6 +484,32 @@ typedef struct {
 } GhosttyCodepoints;
 
 /**
+ * A buffer you provide for the library to fill with Unicode codepoints.
+ *
+ * Set ptr to an array of uint32_t and cap to the number of elements it
+ * holds. The library writes up to cap codepoints and sets len to the total
+ * number available. When len is greater than cap, the call returns
+ * GHOSTTY_OUT_OF_SPACE and ptr holds only the first cap codepoints.
+ *
+ * To learn the count without copying anything, set ptr to NULL and cap to
+ * 0, then read len.
+ *
+ * This struct has a frozen layout and will not gain fields in future
+ * versions.
+ */
+typedef struct {
+  /** Where codepoints are written. May be NULL when cap is 0. */
+  uint32_t* ptr;
+
+  /** Number of uint32_t elements ptr can hold. */
+  size_t cap;
+
+  /** Set by the library to the total number of codepoints, whether or not
+   *  they all fit. */
+  size_t len;
+} GhosttyCodepointBuffer;
+
+/**
  * Initialize a sized struct to zero and set its size field.
  *
  * Sized structs use a `size` field as the first member for ABI
@@ -368,10 +522,9 @@ typedef struct {
  *
  * Example:
  * @code
- * GhosttyTerminalSelectionFormatOptions opts =
- *     GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
- * opts.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
- * opts.trim = true;
+ * GhosttyTerminalSelectLineOptions opts =
+ *     GHOSTTY_INIT_SIZED(GhosttyTerminalSelectLineOptions);
+ * opts.ref = ref;
  * @endcode
  */
 #ifdef __cplusplus
@@ -426,6 +579,25 @@ GHOSTTY_API void ghostty_sized_init(void* ptr, size_t size);
  * describe the current linked build and are not a cross-version stability
  * promise.
  *
+ * Every key enum also has a `keys` object. A key enum is the enum that a
+ * `_get`, `_set` or `_get_multi` function takes to pick a value, such as
+ * GhosttyTerminalData or GhosttyTerminalOption. Each key lists its
+ * `direction` and the `type` that its `void *` value points at:
+ *
+ * - An `"out"` key is read. Pass a pointer to storage of `type`, and the
+ *   library writes the value there.
+ * - An `"in"` key is set. Pass a pointer to a value of `type`, and the
+ *   library reads it. ghostty_formatter_get() also takes these keys, and
+ *   writes a value of the same `type`.
+ * - A `type` of `opaque` is an untyped pointer, such as userdata. Pass the
+ *   pointer itself.
+ * - A `type` that names a `callback` descriptor sets a callback. Pass the
+ *   function pointer itself, not a pointer to it.
+ *
+ * Callback descriptors, such as GhosttyTerminalBellFn, describe a function
+ * pointer typedef. `params` lists the parameter types in order and `return`
+ * gives the return type. Both use the same type references as struct fields.
+ *
  * The formal format is defined by the
  * <a href="types.schema.json">libghostty-vt ABI manifest JSON Schema</a>.
  *
@@ -442,7 +614,19 @@ GHOSTTY_API void ghostty_sized_init(void* ptr, size_t size);
  *     "GhosttyRenderStateData": {
  *       "kind": "enum", "size": 4, "align": 4,
  *       "underlying": "i32", "prefix": "GHOSTTY_RENDER_STATE_DATA_",
- *       "values": { "INVALID": 0, "DIRTY": 3, "MAX_VALUE": 2147483647 }
+ *       "values": { "INVALID": 0, "DIRTY": 3, "MAX_VALUE": 2147483647 },
+ *       "keys": {
+ *         "DIRTY": { "direction": "out", "type": "GhosttyRenderStateDirty" }
+ *       }
+ *     },
+ *     "GhosttyTerminalBellFn": {
+ *       "kind": "callback", "size": 4, "align": 4,
+ *       "params": [
+ *         { "type": "GhosttyTerminal" },
+ *         { "type": "pointer", "elem": "opaque", "const": false,
+ *           "nullable": true }
+ *       ],
+ *       "return": { "type": "void" }
  *     },
  *     "GhosttyStyleColor": {
  *       "kind": "struct", "size": 4, "align": 1,

@@ -255,6 +255,17 @@ fn initLib(
         // 1.0.0, so only the install name can follow SharedVersion here.
         lib.install_name = SharedVersion.init(b, zig.version).install_name;
     }
+    if (kind == .shared and target.result.ofmt == .elf) {
+        // Export only the ghostty_* functions and tag them with a version
+        // that the loader checks. The map file explains the versioning.
+        lib.version_script = b.path("src/terminal/c/ghostty-vt.map");
+
+        // Zig's own ELF linker, which Debug builds on x86_64 use by
+        // default, silently ignores the version script. LLD applies it,
+        // and Zig can only link with LLD when it compiles with LLVM.
+        lib.use_llvm = true;
+        lib.use_lld = true;
+    }
     lib.installHeadersDirectory(
         b.path("include/ghostty"),
         "ghostty",
@@ -954,6 +965,60 @@ fn detectAppleSDK(
         },
     ) catch return false;
     return true;
+}
+
+/// Adds the ABI check for this library to two build steps. `test_step` fails
+/// if the library doesn't match the goldens in `src/terminal/c/abi`, and
+/// `update_step` overwrites the goldens for `target` with what the library
+/// has now. See `src/terminal/c/abi/check.zig` for the rules.
+pub fn addAbiCheck(
+    self: *const GhosttyLibVt,
+    b: *std.Build,
+    target: std.Target,
+    test_step: *std.Build.Step,
+    update_step: *std.Build.Step,
+) void {
+    const root_module = b.createModule(.{
+        .root_source_file = b.path("src/terminal/c/abi/check.zig"),
+        .target = b.graph.host,
+    });
+    const tool = b.addExecutable(.{
+        .name = "lib_vt_abi_check",
+        .root_module = root_module,
+    });
+
+    // Goldens are named after the target, such as x86_64-linux-gnu. Targets
+    // with no ABI leave it out, such as aarch64-macos.
+    const arch_os = b.fmt("{t}-{t}", .{ target.cpu.arch, target.os.tag });
+    const golden = if (target.abi == .none)
+        b.fmt("src/terminal/c/abi/{s}.json", .{arch_os})
+    else
+        b.fmt("src/terminal/c/abi/{s}-{t}.json", .{ arch_os, target.abi });
+
+    inline for (.{
+        .{ "check", test_step },
+        .{ "update", update_step },
+    }) |mode| {
+        const run = b.addRunArtifact(tool);
+        run.addArg(mode[0]);
+        run.addFileArg(self.output);
+        run.addArg(golden);
+        run.addArg("src/terminal/c/abi/symbols.txt");
+        run.addArg("src/lib_vt.zig");
+        run.addArg("include/ghostty");
+        run.setCwd(b.path("."));
+
+        // The source tree paths above are plain arguments, so Zig can't
+        // tell when those files change. Always run, which takes no time.
+        run.has_side_effects = true;
+        mode[1].dependOn(&run.step);
+    }
+
+    const tests = b.addTest(.{
+        .name = "lib-vt-abi-check-test",
+        .root_module = root_module,
+    });
+    test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
 pub fn install(

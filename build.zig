@@ -71,6 +71,14 @@ pub fn build(b: *std.Build) !void {
         "test-lib-vt-schema",
         "Validate the libghostty-vt ABI type manifest",
     );
+    const test_lib_vt_abi_step = b.step(
+        "test-lib-vt-abi",
+        "Fail if libghostty-vt changed its ABI in a way that is not an addition",
+    );
+    const update_lib_vt_abi_step = b.step(
+        "update-lib-vt-abi",
+        "Record the libghostty-vt ABI of the current target in src/terminal/c/abi",
+    );
     const test_valgrind_step = b.step(
         "test-valgrind",
         "Run tests under valgrind",
@@ -81,7 +89,13 @@ pub fn build(b: *std.Build) !void {
     );
 
     // Ghostty resources like terminfo, shell integration, themes, etc.
-    const resources = try buildpkg.GhosttyResources.init(b, &config, &deps);
+    // Only the app uses them, so a libghostty-vt build skips them, which
+    // also keeps it from downloading the themes package. This is null only
+    // when emit_lib_vt is set, and every use below is in an app-only branch.
+    const resources: ?buildpkg.GhosttyResources = if (config.emit_lib_vt)
+        null
+    else
+        try buildpkg.GhosttyResources.init(b, &config, &deps);
     const i18n = if (config.i18n) try buildpkg.GhosttyI18n.init(b, &config) else null;
 
     // Ghostty executable, the actual runnable Ghostty program.
@@ -119,6 +133,14 @@ pub fn build(b: *std.Build) !void {
         const check_step = b.step("distcheck", "Install and validate the dist tarball");
         check_step.dependOn(dist.check_step);
         check_step.dependOn(dist.install_step);
+        // Only libghostty-vt builds (-Demit-lib-vt) have this step.
+        if (dist.deps_install_step) |deps_install| {
+            const deps_step = b.step(
+                "dist-deps",
+                "Build the libghostty-vt dependency tarball for offline builds (needs network)",
+            );
+            deps_step.dependOn(deps_install);
+        }
     }
 
     // libghostty-vt
@@ -154,6 +176,8 @@ pub fn build(b: *std.Build) !void {
         type_schema_test.addFileArg(b.path("src/terminal/c/types.schema.json"));
         type_schema_test.addFileArg(shared.output);
         test_lib_vt_schema_step.dependOn(&type_schema_test.step);
+
+        shared.addAbiCheck(b, config.target.result, test_lib_vt_abi_step, update_lib_vt_abi_step);
     } else {
         _ = b.addFail("cannot execute the ABI manifest for a native freestanding target");
     }
@@ -220,7 +244,7 @@ pub fn build(b: *std.Build) !void {
     if (config.app_runtime != .none) {
         if (config.emit_exe) {
             exe.install();
-            resources.install();
+            if (resources) |v| v.install();
             if (i18n) |v| v.install();
         }
     } else if (!config.emit_lib_vt) {
@@ -263,7 +287,7 @@ pub fn build(b: *std.Build) !void {
 
             // The xcframework build always installs resources because our
             // macOS xcode project contains references to them.
-            resources.install();
+            resources.?.install();
             if (i18n) |v| v.install();
         }
 
@@ -275,7 +299,7 @@ pub fn build(b: *std.Build) !void {
                 .xcframework = &xcframework,
                 .docs = &docs,
                 .i18n = if (i18n) |v| &v else null,
-                .resources = &resources,
+                .resources = &resources.?,
             },
         );
         if (config.emit_macos_app) {
@@ -323,7 +347,7 @@ pub fn build(b: *std.Build) !void {
                     .xcframework = &xcframework_native,
                     .docs = &docs,
                     .i18n = if (i18n) |v| &v else null,
-                    .resources = &resources,
+                    .resources = &resources.?,
                 },
             );
 
@@ -409,6 +433,46 @@ pub fn build(b: *std.Build) !void {
             });
         };
         test_lib_vt_step.dependOn(&b.addRunArtifact(version_h_test).step);
+
+        // The public headers must compile without warnings in every
+        // language standard we support, so compile a file that includes
+        // vt.h once per standard with strict warnings as errors.
+        {
+            const wf = b.addWriteFiles();
+            const c_src = wf.add("vt_h_test.c", "#include <ghostty/vt.h>\n");
+            const cpp_src = wf.add("vt_h_test.cpp", "#include <ghostty/vt.h>\n");
+            const warnings: []const []const u8 = &.{
+                "-Wall",
+                "-Wextra",
+                "-Wpedantic",
+                "-Werror",
+            };
+            const Case = struct { std: []const u8, src: std.Build.LazyPath };
+            const cases: []const Case = &.{
+                .{ .std = "c11", .src = c_src },
+                .{ .std = "c23", .src = c_src },
+                .{ .std = "c++17", .src = cpp_src },
+            };
+            for (cases) |case| {
+                const flags = std.mem.concat(b.allocator, []const u8, &.{
+                    &.{b.fmt("-std={s}", .{case.std})},
+                    warnings,
+                }) catch @panic("OOM");
+                const obj_mod = b.createModule(.{
+                    .target = b.graph.host,
+                    .optimize = .debug,
+                    .link_libc = true,
+                    .link_libcpp = std.mem.startsWith(u8, case.std, "c++"),
+                });
+                obj_mod.addIncludePath(b.path("include"));
+                obj_mod.addCSourceFile(.{ .file = case.src, .flags = flags });
+                const obj = b.addObject(.{
+                    .name = b.fmt("vt-h-{s}", .{case.std}),
+                    .root_module = obj_mod,
+                });
+                test_lib_vt_step.dependOn(&obj.step);
+            }
+        }
 
         if (config.emit_test_exe) {
             // With -Demit-test-exe, test-lib-vt-build builds only the C API

@@ -31,6 +31,35 @@
   registered, or if it does not match its Zig type. Run it with
   `zig build test-lib-vt -Dtest-filter="C header"`.
 
+## ABI Goldens
+
+`src/terminal/c/abi/` holds goldens, which are committed records of the
+ABI: one type manifest per target, and `symbols.txt`, the sorted list of
+public functions. `zig build test-lib-vt-abi` compares the library to them
+and fails on anything that could break a program built against an earlier
+version. CI runs it for each target that has a golden. The rules are at the
+top of `src/terminal/c/abi/check.zig`.
+
+- Allowed: a new function, a new type, a new enum value with a new name and
+  number, a key type for that new value, and a new field after the end of a
+  sized struct.
+- Everything else fails, such as removing something or changing a size,
+  alignment, offset, field type, enum value, prefix or key type.
+- Never update the goldens to get past a failure. A change that isn't an
+  addition needs a new major version.
+
+After an intentional addition, update the goldens of every target:
+
+```
+zig build update-lib-vt-abi -Dtarget=x86_64-linux-gnu
+zig build update-lib-vt-abi -Dtarget=aarch64-macos
+zig build update-lib-vt-abi -Dtarget=wasm32-freestanding
+```
+
+The macOS target needs a Mac. A new function fails until `symbols.txt`
+lists it, and any target updates that file. Other additions pass without an
+update, but the check prints a reminder.
+
 ## Sized Structs
 
 Sized structs follow the rule documented on `sizedCheck` in
@@ -67,8 +96,8 @@ Never guard the check with `std.debug.runtime_safety`.
   `lib.enumFromPtr(E, ptr) orelse return .invalid_value`.
 - Keep shared Zig enums from the core exhaustive. Convert at the C API
   instead of adding `_` to them.
-- `_get`, `_set` and `_setopt` functions return `Result`, even when every
+- `_get` and `_set` functions return `Result`, even when every
   current option always succeeds, so new options can report errors.
-- A NULL value to a `_set` or `_setopt` resets that option to its
+- A NULL value to a `_set` resets that option to its
   documented default and returns `.success`. Document each option's
   default in the header.

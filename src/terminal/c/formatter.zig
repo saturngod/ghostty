@@ -115,7 +115,7 @@ pub const Option = enum(c_int) {
     _,
 
     /// The type that a `set` value or a `get` output points to.
-    pub fn Type(comptime self: Option) type {
+    pub fn InType(comptime self: Option) type {
         return switch (self) {
             .invalid => void,
             .emit => Format,
@@ -132,6 +132,10 @@ pub fn terminal_new(
     result: *Formatter,
     terminal_: terminal_c.Terminal,
 ) callconv(lib.calling_conv) Result {
+    if (comptime !lib.feature(.formatter)) {
+        result.* = null;
+        return .unsupported;
+    }
     result.* = terminal_new_(
         alloc_,
         terminal_,
@@ -176,6 +180,7 @@ pub fn set(
     option: Option,
     value: ?*const anyopaque,
 ) callconv(lib.calling_conv) Result {
+    if (comptime !lib.feature(.formatter)) return .unsupported;
     return switch (option) {
         _ => .unsupported,
         .invalid => .invalid_value,
@@ -194,7 +199,7 @@ pub fn set(
 fn setTyped(
     f: *formatterpkg.TerminalFormatter,
     comptime option: Option,
-    value: ?*const option.Type(),
+    value: ?*const option.InType(),
 ) Result {
     switch (option) {
         .invalid => comptime unreachable,
@@ -225,6 +230,7 @@ pub fn get(
     option: Option,
     out: ?*anyopaque,
 ) callconv(lib.calling_conv) Result {
+    if (comptime !lib.feature(.formatter)) return .unsupported;
     return switch (option) {
         _ => .unsupported,
         .invalid => .invalid_value,
@@ -243,7 +249,7 @@ pub fn get(
 fn getTyped(
     f: *const formatterpkg.TerminalFormatter,
     comptime option: Option,
-    out: *option.Type(),
+    out: *option.InType(),
 ) Result {
     switch (option) {
         .invalid => comptime unreachable,
@@ -272,6 +278,7 @@ pub fn format(
     formatter_: Formatter,
     writer: io_c.Writer,
 ) callconv(lib.calling_conv) Result {
+    if (comptime !lib.feature(.formatter)) return .unsupported;
     const wrapper = formatter_ orelse return .invalid_value;
     if (!writer.valid()) return .invalid_value;
 
@@ -299,6 +306,7 @@ pub fn format_buf(
     out_len: usize,
     out_written: *usize,
 ) callconv(lib.calling_conv) Result {
+    if (comptime !lib.feature(.formatter)) return .unsupported;
     const wrapper = formatter_ orelse return .invalid_value;
 
     var writer: std.Io.Writer = .fixed(if (out_) |out|
@@ -329,6 +337,7 @@ pub fn format_alloc(
     out_ptr: *?[*]u8,
     out_len: *usize,
 ) callconv(lib.calling_conv) Result {
+    if (comptime !lib.feature(.formatter)) return .unsupported;
     const wrapper = formatter_ orelse return .invalid_value;
     const alloc = lib.alloc.default(alloc_);
 
@@ -348,6 +357,7 @@ pub fn format_alloc(
 }
 
 pub fn free(formatter_: Formatter) callconv(lib.calling_conv) void {
+    if (comptime !lib.feature(.formatter)) return;
     const wrapper = formatter_ orelse return;
     const alloc = wrapper.alloc;
     alloc.destroy(wrapper);

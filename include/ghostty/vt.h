@@ -84,8 +84,8 @@
  * @endcode
  *
  * The same pattern is used by every function whose name ends in `_get`,
- * `_set`, `_setopt` or `_get_multi`, such as ghostty_terminal_get(),
- * ghostty_render_state_set() and ghostty_key_encoder_setopt().
+ * `_set` or `_get_multi`, such as ghostty_terminal_get(),
+ * ghostty_render_state_set() and ghostty_key_encoder_set().
  *
  * @subsection keys_compat_sec Newer Headers, Older Libraries
  *
@@ -227,6 +227,108 @@
  *   result = ghostty_terminal_select_line(terminal, &opts, &selection);
  * }
  * @endcode
+ *
+ * @section buffers_sec Output Buffers
+ *
+ * Functions that write bytes for you take a buffer, its length and an
+ * `out_written` pointer. Pass NULL with a length of 0 to learn the size
+ * needed. When there is nothing to write, the call returns
+ * GHOSTTY_SUCCESS and sets `out_written` to 0, even for a size query.
+ * When the buffer is too small, the call returns GHOSTTY_OUT_OF_SPACE and
+ * sets `out_written` to the size needed. The contents of the buffer are
+ * then unspecified unless the function says otherwise, so discard them
+ * and retry with a larger buffer.
+ *
+ * @section threads_sec Threads
+ *
+ * The library creates no threads, and every callback runs on the thread
+ * whose call triggered it. Calls on one handle, and on any handle
+ * borrowed from it, must not run at the same time unless a function's
+ * documentation says otherwise. Handles that share nothing can be used on
+ * different threads.
+ *
+ * @section features_sec Optional Features
+ *
+ * Some parts of libghostty-vt are optional. A program that only draws a
+ * terminal doesn't need search or snapshots, for example, so the library
+ * can be built without them to make it smaller. Features are chosen when
+ * the library is built, with the `-Dvt-features` build option.
+ *
+ * Every function in these headers exists in every build, whichever
+ * features it includes. A program links and loads the same way against
+ * any build. When it calls a function whose feature was left out, the
+ * function does nothing and returns GHOSTTY_UNSUPPORTED.
+ *
+ * | Feature              | Functions |
+ * | -------------------- | --------- |
+ * | `%snapshot`           | `ghostty_snapshot_*` |
+ * | `%formatter`          | `ghostty_formatter_*` |
+ * | `%selection`          | `ghostty_terminal_select_*`, `ghostty_terminal_selection_*`, `ghostty_selection_gesture_*` |
+ * | `%search`             | `ghostty_search_*` |
+ * | `%render_state`       | `ghostty_render_state_*` |
+ * | `%input_encode`       | `ghostty_key_event_*`, `ghostty_key_encoder_*`, `ghostty_mouse_event_*`, `ghostty_mouse_encoder_*`, ghostty_focus_encode(), `ghostty_paste_*`, ghostty_terminal_paste() |
+ * | `%color`              | `ghostty_color_*` |
+ * | `%grid_introspection` | `ghostty_grid_ref_*`, `ghostty_tracked_grid_ref_*`, `ghostty_cell_get*`, `ghostty_row_get*`, ghostty_terminal_grid_ref_track() |
+ * | `%glyph_protocol`     | None. It lets applications register custom glyphs with Ghostty's glyph protocol. |
+ * | `%kitty_graphics`     | `ghostty_kitty_graphics_*`, and the Kitty options and data of ghostty_terminal_set() and ghostty_terminal_get() |
+ *
+ * A few functions depend on two features:
+ *
+ * - ghostty_terminal_grid_ref() and ghostty_terminal_point_from_grid_ref()
+ *   need either `%grid_introspection` or `%selection`.
+ * - ghostty_tracked_grid_ref_snapshot() needs both `%grid_introspection`
+ *   and `%snapshot`.
+ *
+ * Kitty graphics need a clock, so builds for targets without an operating
+ * system, such as wasm32-freestanding, never include `%kitty_graphics`.
+ *
+ * @subsection features_check_sec Checking for a Feature
+ *
+ * To find out up front, for example to hide a menu item, ask
+ * ghostty_build_info() with the feature's key. Each feature has a
+ * `GHOSTTY_BUILD_INFO_FEATURE_*` key, except Kitty graphics, which uses
+ * GHOSTTY_BUILD_INFO_KITTY_GRAPHICS:
+ *
+ * @code{.c}
+ * bool has_search = false;
+ * ghostty_build_info(GHOSTTY_BUILD_INFO_FEATURE_SEARCH, &has_search);
+ * if (!has_search) {
+ *   // Hide the find bar.
+ * }
+ * @endcode
+ *
+ * You can also just call the function and check its result. A function
+ * that creates a handle sets the handle to NULL, so cleanup code that
+ * frees it still works:
+ *
+ * @code{.c}
+ * GhosttySearch search = NULL;
+ * GhosttyResult result = ghostty_search_new(NULL, &search, terminal);
+ * if (result == GHOSTTY_UNSUPPORTED) {
+ *   // This library was built without search. search is NULL.
+ * }
+ * @endcode
+ *
+ * @subsection features_values_sec Functions Without a Result
+ *
+ * A function that doesn't return a GhosttyResult can't report
+ * GHOSTTY_UNSUPPORTED. When its feature is left out, it returns a fixed
+ * value instead:
+ *
+ * - Functions that free a handle do nothing.
+ * - Functions that return `bool`, such as iterator `_next` functions,
+ *   return false.
+ * - Functions that return a number, an enum or a struct return zero or a
+ *   zeroed struct. ghostty_key_event_get_utf8() returns an empty string.
+ * - ghostty_color_rgb_get(), ghostty_color_palette_default() and
+ *   ghostty_color_palette_generate() fill their outputs with zeros.
+ * - ghostty_color_x11_name_count() returns 0, so the array returned by
+ *   ghostty_color_x11_names() is empty.
+ * - ghostty_kitty_graphics_image() returns NULL.
+ *
+ * In practice these values rarely matter. Most of these functions take a
+ * handle that could only come from a `_new` function of the same
+ * feature, and that function returned GHOSTTY_UNSUPPORTED.
  *
  * @section examples_sec Examples
  *
