@@ -580,7 +580,22 @@ pub const SizeAdjustment = enum {
     cap_height,
     /// Match line height with the primary face.
     line_height,
+    /// For Myanmar fonts: keep the original point size, unless that makes
+    /// Myanmar text wider than the cells the terminal gives it. Then
+    /// shrink it until it fits (see `myanmar_cells_per_ka`).
+    myanmar_fit,
 };
+
+/// How many widths of "က" a line of Myanmar text takes per terminal cell.
+/// On prose with several Myanmar fonts this is 0.63 to 0.70: the terminal
+/// gives each letter and spacing mark a cell, and syllables with stacked
+/// or zero-width marks draw narrower than their cells, so a cell holds
+/// less than a whole letter. A Myanmar font is drawn small enough that
+/// this many "က" fit in a cell. Using a value below that range keeps the
+/// text close to its own size: rows that are still too wide are squeezed
+/// a little (see renderer/myanmar_flow.zig) instead of by a fifth, which
+/// made their letters overlap.
+const myanmar_cells_per_ka = 0.58;
 
 /// Calculate a factor by which to scale the provided face to match
 /// it with the primary face, depending on the specified adjustment.
@@ -612,6 +627,14 @@ fn scaleFactor(
     // be in ems, so that it doesn't matter what size the faces actually are.
     const primary_scale = 1 / primary_metrics.px_per_em;
     const face_scale = 1 / face_metrics.px_per_em;
+
+    if (adjustment == .myanmar_fit) {
+        const ka = face_metrics.myanmar_width orelse return 1.0;
+        if (ka <= 0) return 1.0;
+        const cell = primary_metrics.cell_width * primary_scale;
+        const fit = cell / (myanmar_cells_per_ka * ka * face_scale);
+        return @min(1.0, fit);
+    }
 
     // We get the target metrics from the primary face and this face depending
     // on the specified `adjustment`. If this face doesn't explicitly define a
@@ -657,7 +680,7 @@ fn scaleFactor(
                 face_metrics.lineHeight() * face_scale,
             },
 
-            .none => unreachable,
+            .none, .myanmar_fit => unreachable,
         };
 
     return primary_metric / face_metric;
@@ -1521,4 +1544,45 @@ test "face metrics" {
         wideMetrics.ascii_height,
         wideMetrics.icWidth(),
     );
+}
+
+test "Myanmar fonts shrink only to fit their cells" {
+    const alloc = std.testing.allocator;
+    var c = init();
+    defer c.deinit(alloc);
+
+    // A primary font whose cells are 0.6em wide.
+    c.primary_face_metrics = .{
+        .px_per_em = 10,
+        .cell_width = 6,
+        .ascent = 8,
+        .descent = -2,
+        .line_gap = 0,
+    };
+
+    // "က" is 1.1em wide: 0.638em of Myanmar text per cell at its own size,
+    // more than the 0.6em cell, so it shrinks until it fits.
+    const wide: Metrics.FaceMetrics = .{
+        .px_per_em = 20,
+        .cell_width = 10,
+        .ascent = 16,
+        .descent = -8,
+        .line_gap = 0,
+        .myanmar_width = 22,
+    };
+    try std.testing.expectApproxEqAbs(
+        0.6 / (0.58 * 1.1),
+        c.scaleFactor(wide, .myanmar_fit),
+        1e-9,
+    );
+
+    // A narrow Myanmar font already fits and keeps its own size.
+    var narrow = wide;
+    narrow.myanmar_width = 10;
+    try std.testing.expectEqual(@as(f64, 1.0), c.scaleFactor(narrow, .myanmar_fit));
+
+    // Without a "က" there's nothing to measure.
+    var none = wide;
+    none.myanmar_width = null;
+    try std.testing.expectEqual(@as(f64, 1.0), c.scaleFactor(none, .myanmar_fit));
 }

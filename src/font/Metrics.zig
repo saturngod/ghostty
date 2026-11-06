@@ -148,6 +148,11 @@ pub const FaceMetrics = struct {
     /// NOTE: IC = Ideograph Character
     ic_width: ?f64 = null,
 
+    /// The advance of the Myanmar letter "က" (U+1000), if present. Used to
+    /// size a Myanmar fallback font so its text fits the cells the
+    /// terminal gives it (see Collection.scaleFactor).
+    myanmar_width: ?f64 = null,
+
     /// Convenience function for getting the line height
     /// (ascent - descent + line_gap).
     pub inline fn lineHeight(self: FaceMetrics) f64 {

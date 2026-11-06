@@ -229,9 +229,10 @@ pub fn getIndex(
                     // Myanmar fonts have very tall line metrics to fit
                     // stacked marks, so matching them to the primary font
                     // distorts them. Draw them at their own size like a
-                    // browser does.
+                    // browser does, only smaller if their text wouldn't
+                    // fit its cells.
                     .size_adjustment = if (myanmar.isMyanmar(cp))
-                        .none
+                        .myanmar_fit
                     else
                         font.default_fallback_adjustment,
                 }) catch {
@@ -294,7 +295,9 @@ fn getIndexMyanmar(
             return self.collection.addDeferred(alloc, deferred_face, .{
                 .style = style,
                 .fallback = true,
-                .size_adjustment = .none,
+                // Its own size, only smaller if its text wouldn't fit its
+                // cells (see Collection.SizeAdjustment.myanmar_fit).
+                .size_adjustment = .myanmar_fit,
             }) catch {
                 deferred_face.deinit();
                 return null;

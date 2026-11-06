@@ -845,6 +845,17 @@ pub const Face = struct {
             break :ic_width advance;
         };
 
+        // Measure "က" (Myanmar letter ka, U+1000) for our Myanmar width.
+        const myanmar_width: ?f64 = myanmar_width: {
+            const glyph = self.glyphIndex(0x1000) orelse break :myanmar_width null;
+            const advance = ct_font.getAdvancesForGlyphs(
+                .horizontal,
+                &.{@intCast(glyph)},
+                null,
+            );
+            break :myanmar_width if (advance > 0) advance else null;
+        };
+
         return .{
             .px_per_em = px_per_em,
 
@@ -864,6 +875,7 @@ pub const Face = struct {
             .ex_height = ex_height,
             .ascii_height = ascii_height,
             .ic_width = ic_width,
+            .myanmar_width = myanmar_width,
         };
     }
 
