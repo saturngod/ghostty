@@ -228,8 +228,8 @@ typedef enum GHOSTTY_ENUM_TYPED {
  * @param data The build info field to query
  * @param out Pointer to store the result (type depends on data parameter)
  * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if `data` is
- *         GHOSTTY_BUILD_INFO_INVALID, or GHOSTTY_UNSUPPORTED if `data` is not
- *         known to this version of the library
+ *         GHOSTTY_BUILD_INFO_INVALID or `out` is NULL, or GHOSTTY_UNSUPPORTED
+ *         if `data` is not known to this version of the library
  *
  * @ingroup build_info
  */
@@ -242,8 +242,8 @@ GHOSTTY_API GhosttyResult ghostty_build_info(GhosttyBuildInfo data, void *out);
  * differ from the GHOSTTY_VT_VERSION of the headers it was compiled
  * against. See @ref version "Version" for when that matters.
  *
- * A release returns its version, such as "0.1.0". A development build
- * also has a pre-release and build suffix, such as "0.2.0-dev+abc1234".
+ * A release returns its version, such as "1.0.0". A development build
+ * also has a pre-release and build suffix, such as "1.1.0-dev+abc1234".
  *
  * This returns the same text as GHOSTTY_BUILD_INFO_VERSION_STRING, but
  * as a null-terminated string that you can pass straight to `printf` or
