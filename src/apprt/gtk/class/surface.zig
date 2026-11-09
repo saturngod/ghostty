@@ -2421,6 +2421,14 @@ pub const Surface = extern struct {
         // window-padding-x, window-padding-y
         self.syncSplitMinSize();
 
+        // background, background-opacity: shown until the first frame.
+        priv.render_surface.setPlaceholderColor(
+            config.background.r,
+            config.background.g,
+            config.background.b,
+            config.@"background-opacity",
+        );
+
         // resize-overlay-duration
         {
             const ms = config.@"resize-overlay-duration".asMilliseconds();

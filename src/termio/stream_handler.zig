@@ -379,13 +379,18 @@ pub const StreamHandler = struct {
             .apc_put => self.apc.feed(self.alloc, value),
             .apc_put_slice => self.apc.feedSlice(self.alloc, value.bytes),
             .kitty_clipboard => try self.kittyClipboard(value),
+            .program_status => switch (value) {
+                .report => |report| if (report.readOption(.app)) |app| {
+                    self.terminal.programStatusApp(app);
+                },
+                .query => {},
+            },
 
             // Unimplemented
             .title_push,
             .title_pop,
             .kitty_dnd,
             .osc_unknown,
-            .program_status,
             => {},
         }
     }

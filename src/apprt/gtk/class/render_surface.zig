@@ -63,6 +63,11 @@ pub const RenderSurface = extern struct {
         /// The GDK Texture currently being displayed.
         texture: ?*gdk.Texture = null,
 
+        /// Color drawn until the renderer delivers its first frame.
+        /// Without it, new surfaces with background-opacity < 1 show
+        /// the desktop through a fully transparent area for a moment.
+        placeholder_color: ?gdk.RGBA = null,
+
         /// `notify::scale` handler id on `scale_surface`.
         scale_notify_id: c_ulong = 0,
 
@@ -173,11 +178,23 @@ pub const RenderSurface = extern struct {
             }
         }
 
-        // If we have a texture, draw it.
-        const texture = priv.texture orelse return;
-
         const widget = self.as(gtk.Widget);
         if (widget.getWidth() == 0 or widget.getHeight() == 0) return;
+
+        // If we have a texture, draw it. Otherwise fill with the
+        // background color so the surface isn't see-through.
+        const texture = priv.texture orelse {
+            if (priv.placeholder_color) |color| {
+                snap.appendColor(&color, &.{
+                    .f_origin = .{ .f_x = 0, .f_y = 0 },
+                    .f_size = .{
+                        .f_width = @floatFromInt(widget.getWidth()),
+                        .f_height = @floatFromInt(widget.getHeight()),
+                    },
+                });
+            }
+            return;
+        };
 
         // Map one texture texel to one device pixel. Widget CSS size would
         // stretch a fractionally scaled buffer. Snap the surface-relative
@@ -300,6 +317,19 @@ pub const RenderSurface = extern struct {
     /// render when this is unset.
     pub fn setCoreSurface(self: *Self, core: ?*CoreSurface) void {
         self.private().core_surface = core;
+    }
+
+    /// Set the color drawn before the renderer's first frame arrives.
+    /// `opacity` is clamped to [0, 1].
+    pub fn setPlaceholderColor(self: *Self, r: u8, g: u8, b: u8, opacity: f64) void {
+        const priv = self.private();
+        priv.placeholder_color = .{
+            .f_red = @as(f32, @floatFromInt(r)) / 255.0,
+            .f_green = @as(f32, @floatFromInt(g)) / 255.0,
+            .f_blue = @as(f32, @floatFromInt(b)) / 255.0,
+            .f_alpha = @floatCast(@max(0, @min(1, opacity))),
+        };
+        if (priv.texture == null) self.as(gtk.Widget).queueDraw();
     }
 
     /// Build a `GdkTexture` from the present and set it as our current

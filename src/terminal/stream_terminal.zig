@@ -1005,6 +1005,7 @@ pub const Handler = struct {
         self: *Handler,
         report: osc.Command.ProgramStatus.Report,
     ) void {
+        if (report.readOption(.app)) |app| self.terminal.programStatusApp(app);
         const func = self.effects.program_status orelse return;
         func(self, report);
     }
