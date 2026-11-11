@@ -13,6 +13,7 @@ pub fn isMyanmar(cp: u32) bool {
     };
 }
 
+
 /// Returns true if the codepoint is a Myanmar combining mark (vowel sign,
 /// medial, tone mark, asat, virama, ...). Marks never start a syllable.
 pub fn isMark(cp: u32) bool {
