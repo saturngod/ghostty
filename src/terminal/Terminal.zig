@@ -130,11 +130,10 @@ flags: packed struct {
     /// next shell prompt, so it doesn't outlive the program.
     myanmar_app_grapheme: bool = false,
 
-    /// Set when the running program counts each grapheme cluster as one
-    /// cell, so a whole Myanmar syllable (သ, ကား, ဉ္ဇာ) takes one cell. This
-    /// is how opencode (OpenTUI) counts. Cleared at the next shell prompt.
-    /// See `programStatusApp`.
-    myanmar_app_cluster_cells: bool = false,
+    /// Set when the running program is opencode, which counts each Myanmar
+    /// letter and each ေ ျ ြ as one column and other marks as zero (see
+    /// printOne). Cleared at the next shell prompt. See `programStatusApp`.
+    myanmar_app_opencode: bool = false,
 
     /// The mouse event mode and format. These are set to the last
     /// set mode in modes. You can't get the right event/format to use
@@ -2040,19 +2039,28 @@ fn printOne(self: *Terminal, c: u21) !void {
         return try self.printZeroWidthAttach(c);
     }
 
-    // Programs such as opencode count each grapheme cluster as one cell,
-    // including a Myanmar syllable with spacing marks or a stacked consonant
-    // (ဉ္ဇာ). Keep the whole syllable in one narrow cell so the cursor and
-    // the next redraw land where the program expects. Otherwise the marks
-    // spill into the cells the program writes next and are painted over.
+    // opencode in Ghostty counts each Myanmar letter as one column, a
+    // stacked consonant too (ဂ in င်္ဂ, the second က in ဥက္ကာ), and one
+    // more column for a letter with ေ ျ or ြ, however many of them it has.
+    // Other marks are zero width: ကား is one column, ကြော and အော are two.
+    // Match it so opencode's next write and its cursor land right after
+    // the text. Otherwise its later syllables start further right than
+    // ours end, and the blanks between show as spaces inside the word.
     if (c > 255 and
-        self.flags.myanmar_app_cluster_cells and
-        self.modes.get(.grapheme_cluster) and
-        unicode.myanmar.isMyanmar(c) and
-        (unicode.myanmar.isMark(c) or self.cursorCellLeftEndsWithVirama()))
+        self.flags.myanmar_app_opencode and
+        unicode.myanmar.isMyanmar(c))
     {
         @branchHint(.unlikely);
-        return try self.printZeroWidthAttach(c);
+        if (unicode.myanmar.isMark(c)) {
+            // The first ေ ျ ြ of a letter takes the extra column; the
+            // cell before it then starts with a mark.
+            if (!unicode.myanmar.isZeroWidthInClusterMode(c) or
+                self.cursorCellLeftIsMyanmarMark())
+            {
+                return try self.printZeroWidthAttach(c);
+            }
+        }
+        return try self.printCodepoint(c, 1, charset, right_limit);
     }
 
     // With grapheme clustering, a Myanmar spacing mark would make its
@@ -2821,39 +2829,22 @@ fn cursorOnMyanmarMark(self: *Terminal) bool {
 }
 
 /// Whether the cell that the next zero-width codepoint would join (see
-/// printZeroWidthAttach) ends with the Myanmar virama ္, which stacks the
-/// next letter under it.
-fn cursorCellLeftEndsWithVirama(self: *Terminal) bool {
+/// printZeroWidthAttach) starts with a Myanmar mark.
+fn cursorCellLeftIsMyanmarMark(self: *Terminal) bool {
     const screen: *Screen = self.screens.active;
     const left: size.CellCountInt = if (self.modes.get(.wraparound) and
         screen.cursor.pending_wrap) 0 else 1;
     if (screen.cursor.x < left) return false;
-
-    const prev = prev: {
-        const immediate = screen.cursorCellLeft(left);
-        if (immediate.wide != .spacer_tail) break :prev immediate;
-        if (screen.cursor.x < left + 1) return false;
-        break :prev screen.cursorCellLeft(left + 1);
-    };
-    if (!prev.hasText()) return false;
-
-    const last: u21 = last: {
-        if (prev.hasGrapheme()) {
-            if (screen.cursor.page_pin.node.page().lookupGrapheme(prev)) |cps| {
-                if (cps.len > 0) break :last cps[cps.len - 1];
-            }
-        }
-        break :last prev.codepoint();
-    };
-    return last == 0x1039;
+    const prev = screen.cursorCellLeft(left);
+    return prev.hasText() and unicode.myanmar.isMark(prev.codepoint());
 }
 
 /// Called with the `app` a program names in its OSC 7501 program status
-/// reports. opencode counts each grapheme cluster as one cell, so it gets
-/// `Flags.myanmar_app_cluster_cells`.
+/// reports. opencode counts Myanmar text its own way, so it gets
+/// `Flags.myanmar_app_opencode`.
 pub fn programStatusApp(self: *Terminal, app: []const u8) void {
     if (std.mem.eql(u8, app, "opencode")) {
-        self.flags.myanmar_app_cluster_cells = true;
+        self.flags.myanmar_app_opencode = true;
     }
 }
 
@@ -3059,7 +3050,7 @@ pub fn semanticPrompt(
         .fresh_line_new_prompt => {
             // A new prompt means the program that set mode 2027 is gone.
             self.flags.myanmar_app_grapheme = false;
-            self.flags.myanmar_app_cluster_cells = false;
+            self.flags.myanmar_app_opencode = false;
 
             // A shell redrawing its prompt after a resize may start lower
             // than where the prompt was cleared (see snapPromptRedraw).
@@ -3125,7 +3116,7 @@ pub fn semanticPrompt(
 
         .prompt_start => {
             self.flags.myanmar_app_grapheme = false;
-            self.flags.myanmar_app_cluster_cells = false;
+            self.flags.myanmar_app_opencode = false;
 
             // Explicit start of prompt. Optional after an A or N command.
             // The k (kind) option specifies the type of prompt:
@@ -20392,35 +20383,46 @@ fn testOpencodeMyanmar(text: []const u8) !usize {
     return t.screens.active.cursor.x;
 }
 
-test "Terminal: opencode counts each Myanmar syllable as one cell" {
+test "Terminal: opencode's Myanmar widths" {
+    // What opencode v2.2.5 counts when it runs in Ghostty.
     try testing.expectEqual(@as(usize, 1), try testOpencodeMyanmar("ကား"));
-    try testing.expectEqual(@as(usize, 1), try testOpencodeMyanmar("ကြော"));
-    try testing.expectEqual(@as(usize, 3), try testOpencodeMyanmar("မြန်မာ"));
-    // The stacked ဇ joins ဉ္, so သဉ္ဇာ is သ + ဉ္ဇာ.
-    try testing.expectEqual(@as(usize, 2), try testOpencodeMyanmar("သဉ္ဇာ"));
+    try testing.expectEqual(@as(usize, 2), try testOpencodeMyanmar("ကြော"));
+    try testing.expectEqual(@as(usize, 4), try testOpencodeMyanmar("မြန်မာ"));
+    try testing.expectEqual(@as(usize, 3), try testOpencodeMyanmar("သဉ္ဇာ"));
+    try testing.expectEqual(@as(usize, 3), try testOpencodeMyanmar("ဥက္ကာ"));
+    try testing.expectEqual(@as(usize, 4), try testOpencodeMyanmar("ကျွန်ုပ်"));
+    try testing.expectEqual(@as(usize, 6), try testOpencodeMyanmar("သိင်္ဂီအောင်"));
 }
 
-test "Terminal: typing a stacked Myanmar syllable in opencode keeps its marks" {
-    // opencode redraws the syllable from its start on every key and then
-    // writes what comes after it one cell later.
+test "Terminal: typing a kinzi in opencode" {
+    // What opencode sends while you type သိင်္ဂီအောင် key by key. It
+    // rewrites the current syllable on every key and puts the cursor
+    // where it counts the text to end.
     const alloc = testing.allocator;
     var t = try init(testing.io, alloc, .{ .cols = 30, .rows = 3 });
     defer t.deinit(alloc);
-    t.modes.set(.grapheme_cluster, true);
 
     var s = t.vtStream();
     defer s.deinit();
     s.nextSlice("\x1b[?2027h\x1b]7501;state=idle:app=opencode\x1b\\");
-    s.nextSlice("\x1b[1;1Hthis is သ|");
-    s.nextSlice("\x1b[1;10Hဉ|");
-    s.nextSlice("\x1b[1;10Hဉ္|");
-    s.nextSlice("\x1b[1;10Hဉ္ဇ|");
-    s.nextSlice("\x1b[1;10Hဉ္ဇာ|");
+    s.nextSlice("\x1b[1;1Hသ\x1b[1;2H");
+    s.nextSlice("\x1b[1;1Hသိ\x1b[1;2H");
+    s.nextSlice("\x1b[1;2Hင\x1b[1;3H");
+    s.nextSlice("\x1b[1;2Hင်\x1b[1;3H");
+    s.nextSlice("\x1b[1;2Hင်္\x1b[1;3H");
+    s.nextSlice("\x1b[1;2Hင်္ဂ\x1b[1;4H");
+    s.nextSlice("\x1b[1;2Hင်္ဂီ\x1b[1;4H");
+    s.nextSlice("\x1b[1;4Hအ\x1b[1;5H");
+    s.nextSlice("\x1b[1;4Hအေ\x1b[1;6H");
+    s.nextSlice("\x1b[1;4Hအော\x1b[1;6H");
+    s.nextSlice("\x1b[1;6Hင\x1b[1;7H");
+    s.nextSlice("\x1b[1;6Hင်\x1b[1;7H");
 
+    // No blank cells inside the word.
     const str = try t.plainString(alloc);
     defer alloc.free(str);
-    try testing.expectEqualStrings("this is သဉ္ဇာ|", str);
-    try testing.expectEqual(@as(usize, 11), t.screens.active.cursor.x);
+    try testing.expectEqualStrings("သိင်္ဂီအောင်", str);
+    try testing.expectEqual(@as(usize, 6), t.screens.active.cursor.x);
 }
 
 test "Terminal: a new prompt drops opencode's Myanmar widths" {
@@ -20431,7 +20433,7 @@ test "Terminal: a new prompt drops opencode's Myanmar widths" {
     var s = t.vtStream();
     defer s.deinit();
     s.nextSlice("\x1b]7501;state=idle:app=opencode\x1b\\");
-    try testing.expect(t.flags.myanmar_app_cluster_cells);
+    try testing.expect(t.flags.myanmar_app_opencode);
     s.nextSlice("\x1b]133;A\x07");
-    try testing.expect(!t.flags.myanmar_app_cluster_cells);
+    try testing.expect(!t.flags.myanmar_app_opencode);
 }
