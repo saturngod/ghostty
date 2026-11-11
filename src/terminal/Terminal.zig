@@ -20084,12 +20084,13 @@ test "Terminal: a prompt redrawn too low after a resize moves up to the cleared 
     s.nextSlice("out\r\n\x1b]133;A\x07> \x1b]133;B\x07");
     s.nextSlice("abcdefghijklmnopqrstuvwxyz0123");
 
-    // 32 columns: 2 rows at 20 columns, 3 rows at 12.
+    // 32 columns: 2 rows at 20 columns. The resize clears the prompt and
+    // keeps it at the 2 rows it took (see PageList.Resize.blank).
     try t.resize(alloc, .{ .cols = 12, .rows = 6 });
-    try testing.expectEqual(@as(usize, 3), t.screens.active.cursor.y);
+    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.y);
 
-    // The shell thinks the prompt is 2 rows and moves up only 1.
-    s.nextSlice("\x1b[A\r\x1b[J\x1b]133;A\x07> \x1b]133;B\x07");
+    // The shell thinks the prompt is 1 row and doesn't move up.
+    s.nextSlice("\r\x1b[J\x1b]133;A\x07> \x1b]133;B\x07");
     s.nextSlice("abcdefghijklmnopqrstuvwxyz0123");
 
     const str = try t.plainString(alloc);
